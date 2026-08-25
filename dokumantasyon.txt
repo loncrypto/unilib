@@ -235,9 +235,23 @@ Burada onemli bir bulgu var: IKI FARKLI V3 ROUTER ARAYUZU vardir.
     "router02" (SwapRouter02)  deadline disari alinmis; multicall(deadline, data)
                                ile uygulaniyor
 
-Hangisinin deploy edildigi chain'e gore degisir. HyperSwap klasigi kullaniyor, Base
-router02 kullaniyor. Yanlis olani cagirmak "bilinmeyen fonksiyon" hatasi verir. Bu
-yuzden kutuphane hangisi oldugunu BYTECODE'DAN otomatik tespit eder.
+Onemli: bir deployment BUNLARIN IKISINI BIRDEN icerebilir. HyperSwap tam olarak bunu
+yapmis - hem SwapRouter01 (klasik) hem SwapRouter02 adresi var, ikisi de ayni V3
+factory'yi ve ayni WETH9'u gosteriyor. Yani "su chain su arayuzu kullanir" diye
+genelleme YAPILAMAZ; onemli olan senin yapilandirdigin ADRESIN hangi arayuzu sundugu.
+
+Yanlis olani cagirmak "bilinmeyen fonksiyon" hatasi verir. Bu yuzden kutuphane
+chain'e gore varsayim yapmaz, yapilandirilan adresin BYTECODE'UNA bakip tespit eder.
+ChainConfig'deki v3_router_variant alani da chain'i degil, o adresi tanimlar - ve
+bos birakilirsa tespit otomatik yapilir.
+
+Bilinen adresler:
+  HyperSwap  SwapRouter01  0x4E2960a8cd19B467b82d26D83fAcb0fAE26b094D  klasik
+             SwapRouter02  0x6D99e7f6747AF2cDbB5164b6DD50e40D4fDe1e77  router02
+  Base       SwapRouter02  0x2626664c2603336E57B271c5C0b26F421741e481  router02
+
+HyperSwap'in resmi ABI'leri github.com/HyperSwapX/abis adresinde - buradaki ABI
+parcalarindan suphelenilirse oradan dogrulanabilir.
 
 
 6.4 pools.py - havuz nesneleri

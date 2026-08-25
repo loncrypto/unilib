@@ -8,7 +8,7 @@ work on Robinhood Chain, HyperEVM, Base, Arbitrum and so on.
 Forks (PancakeSwap, HyperSwap, Project X...) are still Uniswap-shaped, so they fit
 here too - they just may use a different V2 fee or lack V4 entirely.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from web3 import Web3
 
@@ -39,10 +39,16 @@ class ChainConfig:
     v3_router: str | None = None
     v2_router: str | None = None
 
-    # Which V3 router interface is deployed: "classic", "router02", or None to
-    # detect it from bytecode on first use. Chains differ and the wrong guess just
-    # produces an unknown-selector failure, so detection is the safer default.
+    # Which interface v3_router exposes: "classic", "router02", or None to detect it
+    # from bytecode on first use. A deployment often ships BOTH routers, so this
+    # describes the address configured above - not the chain. Detection is the safer
+    # default; the wrong guess just fails on an unknown selector.
     v3_router_variant: str | None = None
+
+    # QuoterV2: the contract built for asking "what would this swap return", exactly,
+    # including fees and price impact. Simulating through the router works too, but
+    # the quoter is the purpose-built tool and needs no balance or allowance.
+    v3_quoter: str | None = None
 
     # Uniswap V2 charges 0.3% (997/1000). Forks differ - PancakeSwap uses 0.25%.
     # A wrong value here silently skews every V2 quote, so it belongs with the chain.
@@ -57,7 +63,7 @@ class ChainConfig:
     def __post_init__(self):
         # Address comparison bugs are silent and nasty, so normalise once here
         # rather than sprinkling .lower() through every call site.
-        for attr in ("wrapped_native", "state_view", "v3_router", "v2_router"):
+        for attr in ("wrapped_native", "state_view", "v3_router", "v2_router", "v3_quoter"):
             value = getattr(self, attr)
             if value is not None:
                 object.__setattr__(self, attr, Web3.to_checksum_address(value))
@@ -90,6 +96,19 @@ class ChainConfig:
                 return symbol
         return None
 
+    def with_rpc(self, rpc_url):
+        """
+        Same chain, different endpoint.
+
+        The bundled rpc_url is a public endpoint: fine to start with, but rate-limited
+        and shared. Anyone running this seriously will want their own (Alchemy,
+        QuickNode, a local node), and that belongs in their project - not in the
+        library. Returns a copy, so the shared config stays untouched.
+
+            CHAIN = CHAINS[999].with_rpc("https://...")
+        """
+        return replace(self, rpc_url=rpc_url)
+
     def connect(self, verify=True):
         """
         Build a Web3 instance for this chain.
@@ -117,20 +136,40 @@ ROBINHOOD = ChainConfig(
     native_symbol="ETH",
     # Official Uniswap V4 deployment - PoolManager is discoverable from StateView.
     state_view="0xf3334192d15450cdd385c8b70e03f9a6bd9e673b",
-    # v3_router / v2_router not verified on this chain yet.
+    # Found by looking at what successful swaps on a live V2 pool actually call, then
+    # verified: has all four swap functions (including the fee-on-transfer variants),
+    # its factory() matches the pool's, and its WETH() matches wrapped_native.
+    v2_router="0x89e5DB8B5aA49aA85AC63f691524311AEB649eba",
+    # v3_router still unverified on this chain.
 )
 
 HYPEREVM = ChainConfig(
     name="HyperEVM",
     chain_id=999,
-    rpc_url="https://rpc.hyperliquid.xyz/evm",
+    # The official endpoint (rpc.hyperliquid.xyz/evm) caps at 100 requests/minute and
+    # kept rate-limiting during normal use. Measured on the same simulation call:
+    #   drpc 357ms | official 792ms | hyperlend 1182ms
+    # Other working public endpoints if this one degrades:
+    #   https://rpc.hyperlend.finance
+    #   https://rpc.purroofgroup.com
+    #   https://hyperliquid-json-rpc.stakely.io
+    # For anything serious, point a project at its own endpoint via chain.with_rpc().
+    rpc_url="https://hyperliquid.drpc.org",
     # WHYPE is a canonical immutable system contract, same code as WETH.
     wrapped_native="0x5555555555555555555555555555555555555555",
     native_symbol="HYPE",
     # HyperSwap is an independent Uniswap fork, not an official Uniswap deployment.
     # No V4 found here, so state_view stays None.
+    #
+    # HyperSwap ships both routers (verified against their docs and on-chain: both
+    # report this chain's V3 factory and WETH9):
+    #   SwapRouter01  0x4E2960a8cd19B467b82d26D83fAcb0fAE26b094D  - classic interface
+    #   SwapRouter02  0x6D99e7f6747AF2cDbB5164b6DD50e40D4fDe1e77  - router02 interface
+    # 01 is configured because it is the one already proven in use here; switching to
+    # 02 only means changing these two lines, the variant is handled automatically.
     v3_router="0x4e2960a8cd19b467b82d26d83facb0fae26b094d",
     v3_router_variant="classic",
+    v3_quoter="0x03A918028f22D9E1473B7959C927AD7425A45C7C",  # QuoterV2
     # v2_router: two candidate addresses were checked and neither held a usable V2
     # router (one had no contract at all), so it stays unset rather than wrong.
     # V2 price reading still works without it - only V2 swaps need a router.

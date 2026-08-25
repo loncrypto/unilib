@@ -1,0 +1,267 @@
+================================================================================
+SIMULASYON NEDIR, NE ISE YARAR
+Zincire "bu islemi yapsam ne olurdu" diye sormak
+================================================================================
+
+
+1. TEMEL FIKIR
+--------------------------------------------------------------------------------
+
+Bir blockchain'de iki farkli sey yapabilirsin:
+
+  ISLEM GONDERMEK (transaction)
+      Imzalarsin, aga yayilir, madenciler/dogrulayicilar isler, zincire yazilir.
+      Gas odersin. Geri alinamaz. Herkes gorur.
+
+  CAGRI YAPMAK (call)
+      Bir dugume "su kodu su anki zincir durumuyla calistir ve sonucu bana soyle,
+      ama HICBIR SEYI KAYDETME" dersin. Gas odemezsin. Zincire hicbir sey yazilmaz.
+      Kimse gormez. Sadece sana cevap doner.
+
+Ikincisine JSON-RPC dilinde "eth_call" denir. Simulasyon dedigimiz sey budur.
+
+Onemli olan su: dugum bunu yaparken KODU GERCEKTEN CALISTIRIR. Tahmin etmez,
+yaklasik hesap yapmaz. Router'in gercek Solidity kodu, havuzun gercek rezervleri,
+tokenin gercek kisitlamalari - hepsi devrededir. Tek fark, sonucun kaydedilmemesi.
+
+Bir benzetme: bir yemegi pisirip tadina bakmak ile, tarifin yazdigi kaloriyi
+hesaplamak arasindaki fark. Simulasyon birincisidir - sadece yedikten sonra
+mutfagi eski haline getirir.
+
+
+2. NEDEN GEREKLI
+--------------------------------------------------------------------------------
+
+Bir swap yapmadan once "ne kadar token alacagim" sorusunun cevabini bilmen gerekir,
+cunku islemde "en az su kadar almazsam iptal et" (amountOutMin) diye bir alt sinir
+belirtiyorsun. Bu sayiyi yanlis hesaplarsan iki kotu sonuc olur:
+
+  Cok yuksek koyarsan  -> islem "Too little received" diyip geri doner, gas yanar
+  Cok dusuk koyarsan   -> kotu bir fiyata razi olmus olursun (sandwich saldirisina
+                          acik hale gelirsin)
+
+Peki bu sayiyi nasil bulacaksin?
+
+YOL 1: SPOT FIYATTAN HESAPLAMA (yaklasik, bazen cok yanlis)
+
+    Havuzun o anki fiyatini oku, harcayacagin miktarla carp. Basit ama iki seyi
+    atlar: komisyonu ve FIYAT ETKISINI.
+
+    Fiyat etkisi su demek: senin isleminin kendisi fiyati degistirir. Havuzdan
+    token cektikce kalan token azalir, fiyat yukselir. Yani ilk aldigin token ile
+    son aldigin token ayni fiyattan gelmez.
+
+    Bunu gercek rakamlarla olctuk (HyperEVM, HYPURR havuzu). Spot fiyatin gercekten
+    ne kadar sapitigi:
+
+        0.1 HYPE  ->  spot %0.04 fazla gosteriyor
+        1 HYPE    ->  spot %0.29 fazla
+        10 HYPE   ->  spot %2.78 fazla
+
+    Islem buyudukce sapma buyuyor. %0.5'lik bir slipaj toleransiyla 10 HYPE'lik bir
+    alim, spot fiyata guvenirsen KESINLIKLE geri doner. Nitekim CHAMELEON satarken
+    tam bunu yasadik.
+
+YOL 2: SIMULASYON (kesin)
+
+    Zincire sorarsin. Komisyon, fiyat etkisi, tokenin varsa transfer vergisi,
+    hepsi otomatik hesaba katilir - cunku gercek kod calisir.
+
+
+3. ISLEM ILE SIMULASYON FARKI
+--------------------------------------------------------------------------------
+
+                        gercek islem           simulasyon (eth_call)
+  ---------------------------------------------------------------------------
+  gas maliyeti          var                    yok
+  zincire yazilir mi    evet                   hayir
+  geri alinabilir mi    hayir                  konu disi, zaten iz birakmaz
+  imza gerekir mi       evet (private key)     hayir
+  suresi                blok suresi kadar      aninda
+  baskasi gorur mu      evet                   hayir
+  sonucu ne             makbuz (receipt)       fonksiyonun dondurdugu deger
+
+Sonuncu onemli: gercek islemde fonksiyonun dondurdugu degeri KOLAY goremezsin
+(makbuzun icindeki loglardan cikarman gerekir). Simulasyonda ise dogrudan donus
+degerini alirsin. Yani "ne kadar alacagim" sorusuna en net cevabi simulasyon verir.
+
+
+4. HATALARI ONCEDEN GORMEK
+--------------------------------------------------------------------------------
+
+Simulasyonun ikinci buyuk faydasi: BASARISIZ OLACAK ISLEMI ONCEDEN YAKALAMAK.
+
+Bir islem zincirde geri donerse (revert), yaptigin degisiklikler iptal olur ama
+GAS YANAR. Yani hem istedigini alamazsin hem para odersin.
+
+Simulasyonda ayni revert bedava gerceklesir ve sana sebebini soyler.
+
+Gercek ornek - GURT tokeni:
+
+    buy_limit.py ile alim denendi, "execution reverted: revert: TF" hatasi alindi
+    ve gas yandi. Sonra simulasyonla arastirdik:
+
+      - 0.01 HYPE'lik alimda bile ayni hata -> demek ki miktar sorunu degil
+      - havuzdan 0 miktar transfer denendi, yine hata -> demek ki miktar hic
+        onemli degil, kisit kosulsuz
+      - bakiyesiz baska bir adresten denendi, FARKLI (standart) hata geldi
+        -> demek ki tokenin kendisi calisiyor, ama havuz icin ozel kural var
+
+    Bu uc testin hicbiri para harcamadi. Gercek islemle deneseydik uc kez gas
+    yakacaktik ve yine de bu kadar bilgi edinemeyecektik.
+
+Ek not: web3.py islem gonderirken gas tahmini icin zaten arka planda bir simulasyon
+yapar (eth_estimateGas). Bu yuzden revert edecek bir islem cogu zaman YAYILMADAN
+once yakalanir. unilib bu yuzden gas'i elle sabitlemiyor - otomatik tahmine
+birakmak, ucretsiz bir guvenlik kontrolu demek.
+
+
+5. state_override: PARAN OLMADAN SIMULE ETMEK
+--------------------------------------------------------------------------------
+
+Bir sorun var: alim simule etmek icin ETH gonderiyormus gibi yapman gerekir, ve
+dugum "bu adresin bu kadar parasi yok" diyip cagriyi reddeder. Yani "5 ETH'im olsa
+ne alirdim" sorusunu sormak icin once 5 ETH'e sahip olman gerekir.
+
+Cozum: eth_call'a "state_override" diye ek bir parametre verilebilir. Anlami:
+"bu cagri suresince su adresin bakiyesi su kadarmis gibi davran".
+
+    override = {benim_adresim: {"balance": hex(gereken_miktar)}}
+    router.functions.exactInputSingle(params).call(tx, state_override=override)
+
+Bu sahtekarlik degil - hicbir sey degismiyor, sadece o tek hesaplama icin varsayim
+yapiliyor. Zincirdeki bakiyen aynen kaliyor.
+
+unilib bunu otomatik yapar (swaps.py -> _call_with_balance). Test ettik: hic parasi
+olmayan yeni bir cuzdanla 10 HYPE'lik alim simule edilebiliyor.
+
+Uyari: her RPC dugumu bu ozelligi desteklemez. unilib desteklenmiyorsa normal
+cagriya duser.
+
+
+6. SIMULASYONUN SINIRLARI
+--------------------------------------------------------------------------------
+
+Simulasyon guclu ama sihir degil. Bilmen gereken dort sinir var:
+
+6.1 SONUC O ANKI DURUMA AITTIR
+
+Simulasyon ile gercek islem arasinda gecen surede baskalari islem yapabilir ve
+fiyat degisir. Simulasyon "su an olsaydi" der, "sen gonderdiginde olacak" demez.
+
+Bunu bizzat yasadik: Robinhood'daki DTF havuzunda formulumuzu router'in cevabiyla
+karsilastirdik.
+
+    ilk deneme (iki ayri cagri, farkli bloklar):
+        0.1 ETH -> formul 12,320 | router 12,110   %1.7 fark  (!)
+        1.0 ETH -> formul 120,166 | router 120,166  tam ayni
+
+    Panige kapilmadan ayni BLOGA sabitleyip tekrar denedik:
+        0.01 ETH -> fark %0.000000
+        0.1  ETH -> fark %0.000000
+        1.0  ETH -> fark %0.000000
+        5.0  ETH -> fark %0.000000
+
+Yani hata yoktu; iki sorgu arasinda havuzda islem olmustu (o havuz aktif, 30.000
+blokta 1.732 swap var). Ders: iki olcumu karsilastiracaksan AYNI BLOGA sabitle
+(block_identifier), yoksa piyasa hareketini hata sanirsin.
+
+6.2 ZINCIRIN DURUMU DEGISEBILIR
+
+Bir seyin bugun calismamasi yarin da calismayacagi anlamina gelmez.
+
+GURT tam bunu yapti: sabah simulasyonda alim kesin sekilde basarisizdi (TF), aksam
+ayni simulasyon basariyla gecti - hem de iki farkli RPC'de, iki farkli router'la.
+Tokenin KODU degismedi (ayni 3466 byte), davranisi degisti. Muhtemelen bir "launch"
+kisiti vardi ve kaldirildi.
+
+Ders: "bu token alinamiyor" sonucu tarihlidir. Bir sure sonra tekrar denemeye deger.
+
+6.3 SATIS SIMULASYONU IZIN (ALLOWANCE) ISTER
+
+Router senin tokenlarini cekecegi icin (transferFrom), once ona izin vermis olman
+gerekir. Izin yoksa simulasyon da revert eder - cunku gercek kod calisiyor ve
+gercekten izin kontrolu yapiyor.
+
+Bu yuzden unilib'in sell() fonksiyonu once approve eder, SONRA simule eder. Sirasi
+tesadufi degil.
+
+6.4 SONUC GARANTI DEGILDIR
+
+Simulasyon dogru cevabi verir ama sen islemi gonderdiginde:
+  - baskasi senden once islem yapmis olabilir (fiyat degisir)
+  - biri kasitli olarak seni sandvicleyebilir (MEV)
+  - blok dolu olabilir, islemin gecikebilir
+
+Bu yuzden simulasyon sonucuna yine de bir SLIPAJ TOLERANSI eklenir. Simulasyon
+"ne alacagimi" soyler; slipaj "en kotu ihtimalle neye razi oldugumu" soyler.
+
+
+7. FARKLI SIMULASYON YOLLARI
+--------------------------------------------------------------------------------
+
+Ayni ise yarayan birkac arac vardir:
+
+  eth_call ile router'i cagirmak
+      unilib'in su an yaptigi. Genel, her yerde calisir. Alim icin bakiye
+      (ya da state_override), satim icin allowance ister.
+
+  Quoter kontrati
+      Uniswap V3'un tam bu is icin yazdigi kontrat. "quoteExactInputSingle" diye
+      bir fonksiyonu var, sadece hesaplar - bakiye de allowance da istemez.
+      HyperSwap'ta QuoterV2 adresi: 0x03A918028f22D9E1473B7959C927AD7425A45C7C
+      (unilib'de v3_quoter alaninda kayitli, ama simulate() henuz kullanmiyor)
+
+  V2'de formul
+      Uniswap V2'de matematik kapali-formdur, yani zincire hic sormadan kesin
+      sonuc hesaplanabilir. unilib bunu pricing.v2_amount_out ile yapar ve
+      dogrulugunu router'a karsi test ettik (dort miktarda da fark sifir).
+      V3/V4'te boyle bir formul YOKTUR - orada simulasyon sart.
+
+  eth_estimateGas
+      Asil isi gas tahmini ama yan etkisi olarak islemi calistirir, yani revert
+      edecekse burada belli olur. Donus degerini vermez, sadece "gecer/gecmez".
+
+  debug_traceTransaction
+      Gecmiste olmus bir islemin adim adim ne yaptigini gosterir. Her RPC
+      desteklemez. "Neden basarisiz oldu" sorusunun en detayli cevabi.
+
+
+8. PRATIKTE NASIL KULLANILIR
+--------------------------------------------------------------------------------
+
+unilib ile:
+
+    from unilib import CHAINS, load_pool, Swapper
+
+    chain = CHAINS[999]
+    w3 = chain.connect()
+    pool = load_pool(chain, "0x...", w3=w3)
+    sw = Swapper(chain, hesap, w3=w3)
+
+    # "1 HYPE harcasam gercekte ne alirim"
+    gercek = sw.simulate(pool, chain.wrapped_native, 1.0)
+
+    # karsilastirma icin spot tahmin
+    spot = pool.quote_buy(1.0)
+    print(f"spot %{(spot/gercek - 1)*100:.2f} fazla gosteriyor")
+
+buy() ve sell() bunu zaten kendiliginden yapar: minimum cikti hesabini simulasyona
+dayandirir, simulasyon calismazsa havuzun kendi hesabina duser.
+
+Ozetle akil yurutme sirasi:
+
+  1. Ne alacagimi ogren        -> simulate()
+  2. Uzerine tolerans ekle     -> slipaj yuzdesi
+  3. Islemi gonder             -> buy() / sell()
+  4. Sonucu dogrula            -> makbuzun status'u
+
+
+9. AKILDA KALMASI GEREKEN UC CUMLE
+--------------------------------------------------------------------------------
+
+  Simulasyon bedavadir ve iz birakmaz - denemekten cekinme.
+
+  Gercek kodu calistirir, o yuzden tahminden degil OLCUMDEN bahsediyoruz.
+
+  Ama olctugun sey "su an" gecerlidir; islem gonderdiginde dunya degismis olabilir.
