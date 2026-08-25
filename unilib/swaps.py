@@ -166,7 +166,7 @@ class Swapper:
 
     # -- simulation ---------------------------------------------------------
 
-    def simulate(self, pool, token_in, amount_in):
+    def simulate(self, pool, token_in, amount_in=None, amount_in_wei=None):
         """
         Ask the chain what this swap would actually return, without sending anything.
 
@@ -174,6 +174,11 @@ class Swapper:
         and hands back the result, costing nothing and changing nothing. Unlike a spot
         price it accounts for fees, price impact and any transfer tax - which is what
         makes it the right basis for a minimum-output figure.
+
+        Pass amount_in_wei to say exactly how much, in the token's own units. Prefer it
+        whenever the number came from the chain (a balance, for instance): converting
+        wei to a float and back does not round-trip, and the result can land slightly
+        ABOVE the balance - which the router then rejects.
 
         Note for sells: the router does a transferFrom, so an allowance must already
         exist or the simulation reverts. Approve first, then simulate.
@@ -183,7 +188,7 @@ class Swapper:
         is_native_in = token_in.lower() in (NATIVE_ADDRESS, self.chain.wrapped_native.lower())
         decimals_in = pool.decimals0 if token_in.lower() == pool.token0.lower() else pool.decimals1
         decimals_out = pool.decimals1 if token_in.lower() == pool.token0.lower() else pool.decimals0
-        amount_in_wei = int(amount_in * 10**decimals_in)
+        amount_in_wei = _resolve_wei(amount_in, amount_in_wei, decimals_in)
 
         try:
             if pool.pool_type == "v3":
@@ -254,7 +259,7 @@ class Swapper:
             return self.chain.wrapped_native
         return address
 
-    def _min_out(self, pool, token_in, amount_in, slippage_pct, min_out):
+    def _min_out(self, pool, token_in, amount_in, slippage_pct, min_out, amount_in_wei=None):
         """
         Work out the minimum acceptable output.
 
@@ -264,11 +269,13 @@ class Swapper:
         """
         if min_out is not None:
             return min_out, None
-        expected = self.simulate(pool, token_in, amount_in)
+        expected = self.simulate(pool, token_in, amount_in, amount_in_wei)
         if expected is None:
             # Simulation unavailable (no router configured, or it reverted) - fall
             # back to the pool's own quote, which is exact on V2 and an estimate on V3.
-            expected = pool.quote(token_in, amount_in)
+            decimals = pool.decimals0 if token_in.lower() == pool.token0.lower() else pool.decimals1
+            human = amount_in if amount_in is not None else amount_in_wei / 10**decimals
+            expected = pool.quote(token_in, human)
         return expected * (1 - slippage_pct / 100), expected
 
     # -- buying -------------------------------------------------------------
@@ -334,9 +341,9 @@ class Swapper:
 
     # -- selling ------------------------------------------------------------
 
-    def sell(self, pool, amount_in, slippage_pct=DEFAULT_SLIPPAGE_PCT, min_out=None,
+    def sell(self, pool, amount_in=None, slippage_pct=DEFAULT_SLIPPAGE_PCT, min_out=None,
              fee_on_transfer=False, unwrap=True, deadline_seconds=DEFAULT_DEADLINE_SECONDS,
-             approve=True, unlimited_approve=True):
+             approve=True, unlimited_approve=True, amount_in_wei=None):
         """
         Sell the pool's tracked token back into the chain's native coin.
 
@@ -348,11 +355,16 @@ class Swapper:
         free: swapExactTokensForETH already unwraps. On V3 the router must be told to,
         which is done by batching an unwrapWETH9 call after the swap - otherwise the
         proceeds arrive as wrapped tokens.
+
+        For "sell everything", pass the balance as amount_in_wei rather than a float.
+        balanceOf returns an integer; dividing it to a float and multiplying back does
+        not always return the same number, and when it lands high the router cannot
+        pull that much and reverts with STF.
         """
         # Resolved before anything else so a missing router raises here rather than
         # after an approval has already been sent.
         router = self._router_for(pool)
-        amount_in_wei = int(amount_in * 10**pool.decimals)
+        amount_in_wei = _resolve_wei(amount_in, amount_in_wei, pool.decimals)
 
         if approve:
             approval = self.ensure_allowance(
@@ -362,7 +374,7 @@ class Swapper:
                 return approval
 
         min_out_human, expected = self._min_out(
-            pool, pool.token, amount_in, slippage_pct, min_out
+            pool, pool.token, None, slippage_pct, min_out, amount_in_wei=amount_in_wei
         )
         min_out_wei = int(min_out_human * 10**pool.base_decimals)
         deadline = int(time.time()) + deadline_seconds
@@ -457,6 +469,22 @@ class Swapper:
         signed = self.account.sign_transaction(tx)
         tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         return self.w3.eth.wait_for_transaction_receipt(tx_hash)
+
+
+def _resolve_wei(amount_in, amount_in_wei, decimals):
+    """
+    Settle on an integer amount from whichever form the caller supplied.
+
+    Exact wei wins when both are given. The float path is a convenience for
+    hand-typed amounts; anything that came out of the chain should travel as wei,
+    because float64 cannot hold an 18-decimal balance exactly and the round trip can
+    end up above the real number.
+    """
+    if amount_in_wei is not None:
+        return int(amount_in_wei)
+    if amount_in is None:
+        raise ValueError("amount_in ya da amount_in_wei verilmeli")
+    return int(amount_in * 10**decimals)
 
 
 def _v4_message(chain):
