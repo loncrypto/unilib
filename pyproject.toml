@@ -1,0 +1,15 @@
+[project]
+name = "unilib"
+version = "0.1.0"
+description = "Uniswap V2/V3/V4 pool reading and swapping across EVM chains"
+requires-python = ">=3.10"
+dependencies = [
+    "web3>=7.14",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["unilib*"]

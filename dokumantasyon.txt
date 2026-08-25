@@ -1,0 +1,438 @@
+================================================================================
+UNILIB - DOKUMANTASYON
+EVM zincirlerinde Uniswap V2/V3/V4 havuzlarini okuma ve islem yapma kutuphanesi
+================================================================================
+
+
+1. BU KUTUPHANE NEDEN VAR
+--------------------------------------------------------------------------------
+
+Robinhood Chain icin bir fiyat takip programi yazdik. Sonra ayni seyi HyperEVM icin
+yazdik. Ikinci projeyi yazarken fark ettik ki dosyalarin buyuk kismi birebir aynidir:
+ayni ABI tanimlari, ayni tick matematigi, ayni pool tipi tespiti. Degisen tek sey
+adreslerdi.
+
+Bunun sebebi basit: Uniswap protokolu her chain'de ayni calisir. Base'deki bir V3
+havuzu ile HyperEVM'deki bir V3 havuzu ayni fonksiyonlari, ayni matematigi kullanir.
+Sadece kontratlarin adresleri farklidir.
+
+unilib bu gozlemi koda cevirir. Adresleri VERI haline getirir, protokol bilgisini tek
+bir yerde toplar. Boylece yeni bir chain'e baslarken pool tipi tespitini, tick
+donusumunu, V4'un pool key cozmesini tekrar yazmazsin - sadece adresleri girersin.
+
+Ne kadar fark ettigi olculdu:
+
+    rbh  (kendi kodu)              767 satir
+    hvm  (kendi kodu)              598 satir
+    base (unilib + watchlib ile)   171 satir
+
+Base projesi digerlerinin yaptigi her seyi yapar, ustelik daha azini yanlis yapar.
+
+
+2. TEMEL FIKIR: NE KUTUPHANEDE, NE PROJEDE
+--------------------------------------------------------------------------------
+
+Ayrim su soruya gore yapildi: "Bu bilgi chain degisince degisir mi?"
+
+KUTUPHANEDE (her chain'de ayni):
+    - Pool tipini nasil anlarim (V2 mi V3 mu)
+    - Tick'ten fiyat nasil hesaplanir
+    - V2'nin cikti formulu
+    - V4'un pool id'sinden pool key nasil cozulur
+    - Approve nasil verilir, swap nasil gonderilir
+
+PROJEDE (senin tercihin, chain'e gore degisebilir):
+    - Kullaniciya hangi sorular sorulur
+    - tokens.json'da ne saklanir
+    - Sembol cakisirsa ne yapilir
+    - Alarm esikleri ne olsun
+
+Bu yuzden add_token.py kutuphaneye tasinmadi. Icindeki "pool tipini tespit et,
+decimals oku" kismi tasindi; "kullaniciya sor, dosyaya yaz" kismi projede kaldi.
+Yeni bir chain'de o davranisi farkli isteyebilirsin.
+
+
+3. KURULUM
+--------------------------------------------------------------------------------
+
+    pip install -e /home/l/dex/unilib
+
+-e (editable) demek: kutuphaneyi duzenledigin an degisiklik gecerli olur, tekrar
+kurmaya gerek kalmaz. Ileride baska bir bilgisayara tasimak istersen kodu bir git
+reposuna koyup su komutu vermen yeterli, kodda hicbir degisiklik gerekmez:
+
+    pip install git+https://github.com/kullanici/unilib
+
+Bagimlilik olarak sadece web3 ister (>=7.14).
+
+
+4. EN BASIT KULLANIM
+--------------------------------------------------------------------------------
+
+    from unilib import CHAINS, load_pool
+
+    chain = CHAINS[8453]              # Base
+    w3 = chain.connect()              # baglanir VE chain_id'yi dogrular
+
+    pool = load_pool(chain, "0xf79478d5a6baE4546F7e489e80b2fC690B558944", w3=w3)
+
+    pool.symbol         # BASECAT   - takip edilen token
+    pool.base_symbol    # WETH      - taban varlik
+    pool.price()        # 1 BASECAT kac WETH eder
+    pool.quote_buy(0.1) # 0.1 ETH harcarsam kac BASECAT alirim
+    pool.quote_sell(1000)  # 1000 BASECAT satarsam kac WETH alirim
+
+Dikkat: load_pool cagrisinda V2 mi V3 mu V4 mu diye BELIRTMEDIK. Kutuphane kendisi
+anladi. Ustteki kod uc versiyonda da aynen calisir - kullanan tarafta
+"if pool_type == 'v3'" gibi bir dallanma hic yok. Eski projelerde bu dallanma
+uc ayri yerde tekrarlaniyordu.
+
+
+5. KAVRAMLAR
+--------------------------------------------------------------------------------
+
+5.1 CHAIN CONFIG - adresler veri olarak
+
+Bir chain'i tanimlayan her sey tek bir nesnede durur: RPC adresi, chain_id, wrapped
+native token, V4 StateView adresi, router adresleri, V2 komisyon orani. Yeni chain
+eklemek bu nesneden bir tane daha yazmak demektir.
+
+connect() metodu baglandiktan sonra chain_id'yi dogrular. Bu kucuk kontrol onemli:
+yanlis RPC'ye baglanirsan hata almazsin, sadece YANLIS CHAIN'DEN makul gorunen veri
+alirsin. Bu sessiz hatalarin en kotusudur.
+
+
+5.2 TOKEN ve BASE - token0/token1 yerine
+
+Uniswap havuzlarinda tokenlar "token0" ve "token1" diye tutulur. Bu siralama sadece
+adreslerin sayisal buyuklugune gore yapilir - anlam tasimaz ve havuzdan havuza
+degisir. Ayni token bir havuzda token0, digerinde token1 olabilir.
+
+Pratikte ise her havuz senin icin "bir taban varlik (ETH/WETH/USDC) + takip ettigin
+bir token" seklinde anlamlidir. Kutuphane bunu bir kez cozer ve o dilden konusur:
+
+    pool.token         takip edilen tokenin adresi
+    pool.base          taban varligin adresi
+    pool.symbol        takip edilen tokenin sembolu
+    pool.base_symbol   taban varligin sembolu
+
+Havuzun iki tarafi da taban varliksa (WETH/USDC gibi) ya da hicbiri degilse, kutuphane
+TAHMIN YURUTMEZ, hata verir. Cunku "hangisi takip edilen token" sorusunun dogru cevabi
+yoktur ve yanlis tahmin sessizce ters yonde fiyat uretir. O durumda belirsizlik
+icermeyen su metod kullanilir:
+
+    pool.quote(token_in=..., amount_in=...)
+
+Bu davranis Base'de gercekten devreye girdi: WETH/USDC havuzunu yukleyince kutuphane
+durdu ve acik metoda yonlendirdi.
+
+
+5.3 QUOTE ve SIMULATE - iki farkli soru
+
+quote() havuzun kendi verisinden hesap yapar. simulate() ise zincire "bu islemi
+yapsam gercekte ne alirim" diye sorar.
+
+Fark neden onemli:
+
+V2'de kapali-form bir formul vardir, yani komisyon ve fiyat etkisi dahil kesin sonuc
+off-chain hesaplanabilir. Bu havuzlarda quote() zaten kesindir (exact_quotes = True).
+
+V3 ve V4'te boyle bir formul YOKTUR. Likidite her tick sinirinda degisebildigi icin
+gercek cikti ancak o sinirlarda yuruyerek bulunur. Bu yuzden V3/V4'te quote() sadece
+spot fiyat tahminidir ve buyuk islemlerde gercekte alacagindan FAZLASINI gosterir.
+
+Olculen gercek rakamlar (Base, BASECAT havuzu):
+
+    0.1 ETH   -> spot %0.04 fazla gosteriyor
+    1 ETH     -> spot %0.29 fazla
+    10 ETH    -> spot %2.78 fazla
+
+Yani %0.5 slipaj toleransiyla 10 ETH'lik bir alim, spot fiyata guvenilirse
+"Too little received" hatasiyla geri doner. HyperEVM'de CHAMELEON satarken yasadigimiz
+sey tam olarak buydu.
+
+simulate() bunu cozer: eth_call ile zincire gercek router kodunu calistirir, hicbir
+sey gondermeden gercek sonucu ogrenir. Ucretsizdir, hicbir seyi degistirmez.
+
+
+6. DOSYA DOSYA
+--------------------------------------------------------------------------------
+
+6.1 pricing.py - saf matematik
+
+Bu dosyada ag baglantisi, config, web3 YOKTUR. Sayi alir, sayi verir. Bu kasitli bir
+ayrimdir: bu fonksiyonlardaki bir yon/isaret hatasi hata vermez, sadece makul gorunen
+yanlis bir sayi uretir. Ayri tutulunca aga hic baglanmadan test edilebiliyorlar.
+
+    tick_to_prices(tick, decimals0, decimals1)
+        V3/V4'te havuzun fiyati "tick" denen logaritmik bir sayiyla tutulur. Bu
+        fonksiyon onu insanin okuyabilecegi iki fiyata cevirir. Decimals farki
+        bolunmezse sayi anlamsiz cikar, o yuzden parametre olarak istenir.
+
+    sqrt_price_x96_to_prices(sqrt_price_x96, decimals0, decimals1)
+        Ayni sonuc, ama tick yerine sqrtPriceX96'dan. Ikisi de slot0'dan gelir; tick
+        yuvarlanmis haldir, sqrtPriceX96 tam fiyati tasir. Havuz iki tick arasindayken
+        bu daha hassastir - kutuphane bu yuzden bunu kullanir.
+
+    v2_amount_out(amount_in_wei, reserve_in, reserve_out, fee_num, fee_den)
+        V2'de bir islemin KESIN ciktisi. Solidity'deki UniswapV2Library.getAmountOut
+        ile birebir ayni tamsayi formulu. Komisyonu ve fiyat etkisini hesaba katar -
+        spot fiyat carpiminin atladigi iki sey de budur.
+        fee_num varsayilani 997 (Uniswap'in %0.3'u). Fork'lar farkli olabilir,
+        PancakeSwap %0.25 kullanir (9975/10000).
+
+    v2_amount_in(amount_out_wei, ...)
+        Tersi: "tam olarak N token istiyorum, bana kaca mal olur".
+
+    percentage_change(old, new)
+        Yuzde degisim. old sifirsa bolme hatasi vermek yerine 0 doner.
+
+    apply_slippage(amount, slippage_pct)
+        Beklenen ciktiyi slipaj toleransi kadar dusurup kabul edilebilir minimumu verir.
+
+
+6.2 chains.py - chain bilgileri
+
+    ChainConfig
+        Bir chain'i tanimlayan dondurulmus (frozen) veri sinifi. Alanlari:
+
+        name, chain_id, rpc_url      temel bilgiler
+        wrapped_native               WETH / WHYPE gibi sarmalanmis native token
+        native_symbol                ETH, HYPE, BNB...
+        state_view                   V4 okumasi icin; V4 yoksa None
+        v3_router, v2_router         swap icin; bilinmiyorsa None
+        v3_router_variant            "classic" / "router02" / None (otomatik tespit)
+        v2_fee_numerator/denominator V2 komisyonu (fork'a gore degisir)
+        extra_base_tokens            USDC gibi ek taban varliklar
+
+        None birakilan bir alan "bu chain'de yok ya da henuz dogrulanmadi" demektir.
+        Kutuphane o ozelligi kullanmak gerektiginde TAHMIN YURUTMEZ, net hata verir.
+
+    ChainConfig.base_tokens
+        Taban varlik sayilan tokenlarin listesi. Native ve wrapped native her zaman
+        icindedir; chain'e stablecoin vs. eklenebilir.
+
+    ChainConfig.connect(verify=True)
+        Web3 baglantisi kurar ve chain_id'yi dogrular.
+
+    CHAINS
+        Tanimli chain'ler, chain_id'ye gore. Su an: 4663 Robinhood, 999 HyperEVM,
+        8453 Base.
+
+    get_chain(chain_id)
+        Tanimli degilse hangilerinin tanimli oldugunu soyleyen okunakli bir hata verir.
+
+
+6.3 abis.py - kontrat arayuzleri
+
+Sadece kullanilan fonksiyonlarin ABI parcalari. Resmi ABI'ler cok buyuktur ve
+cogunlugu bizi ilgilendirmez; kucuk tutmak kutuphanenin zincirde tam olarak neye
+dokundugunu gorunur kilar.
+
+Burada onemli bir bulgu var: IKI FARKLI V3 ROUTER ARAYUZU vardir.
+
+    "classic" (ISwapRouter)    deadline, params struct'inin ICINDE
+    "router02" (SwapRouter02)  deadline disari alinmis; multicall(deadline, data)
+                               ile uygulaniyor
+
+Hangisinin deploy edildigi chain'e gore degisir. HyperSwap klasigi kullaniyor, Base
+router02 kullaniyor. Yanlis olani cagirmak "bilinmeyen fonksiyon" hatasi verir. Bu
+yuzden kutuphane hangisi oldugunu BYTECODE'DAN otomatik tespit eder.
+
+
+6.4 pools.py - havuz nesneleri
+
+Bu dosyanin butun amaci su: "fiyat nedir?" sorusu V2, V3 ve V4'te ayni sorudur, ama
+cevap uc farkli yerden gelir (rezervler / slot0 / ortak PoolManager). Kullanan kod
+soruyu bir kez sorsun, versiyona gore dallanmasin.
+
+    fetch_token_info(w3, address, chain)
+        Tokenin sembolu ve decimals'ini zincirden okur. Sifir adres native coin
+        demektir ve onun ERC20 kontrati yoktur, o yuzden config'den cevaplanir.
+
+    detect_pool_type(w3, pool_address)
+        V2 mi V3 mu? Ikisinde de token0()/token1() vardir, o ayirt etmez. Ama fee()
+        sadece V3'te, getReserves() sadece V2'de bulunur - onlari deneyerek anlar.
+
+    get_pool_manager(w3, state_view_address)
+        StateView'a "sen hangi PoolManager'i okuyorsun" diye sorar. Her chain icin
+        elle yazmak yerine boyle alinir.
+
+    fetch_v4_pool_key(w3, state_view_address, pool_id, from_block=0)
+        V4'un en onemli numarasi burada. V4'te pool id, PoolKey'in hash'idir ve
+        TERSINE CEVRILEMEZ. Ama PoolManager havuz kurulurken bir "Initialize" olayi
+        (event) yayinlar ve bu olay pool id ile indekslenmis halde su bilgileri tasir:
+        iki token, fee, tickSpacing, hooks. Yani bir log sorgusu, hash'in sakladigini
+        geri verir.
+        from_block varsayilani 0 (tum zincir gecmisi). Chain buyudukce bazi RPC'ler
+        bu araligi reddedebilir; o zaman deploy blogu verilmelidir.
+
+    Pool (ortak arayuz)
+        price()        takip edilen tokenin taban varlik cinsinden fiyati
+        base_price()   tersi
+        quote_sell(a)  a kadar token satarsam ne alirim
+        quote_buy(a)   a kadar taban varlik harcarsam ne alirim
+        quote(token_in, amount_in)   belirsizlik icermeyen hali
+        exact_quotes   quote() kesin mi, tahmin mi (sadece V2'de True)
+
+    V2Pool
+        Her havuz kendi kontrati, iki rezerv tutar. Kesin quote'un mumkun oldugu tek
+        versiyon.
+
+    V3Pool
+        Yogunlastirilmis likidite. Fiyat slot0'da. fee havuzdan okunur.
+
+    V4Pool
+        Havuzun adresi yoktur; hepsi tek PoolManager'in icinde yasar ve bytes32 bir
+        pool id ile adreslenir. Durum StateView uzerinden okunur.
+        has_hooks ozelligi onemli: hooks adresi sifir degilse havuzun ekonomisi
+        standart olmayabilir. fee=0 gorunen bir havuz, kesintiyi hook araciligiyla
+        aliyor olabilir. Robinhood'da PURR, PBUX, ARROWS bu durumda.
+
+    load_pool(chain, identifier, w3=None, from_block=0)
+        Giris uzunlugu tipi soyler: adres 40 hex karakter, V4 pool id 64. Adres ise
+        versiyon zincirde yoklanir; pool id ise PoolKey Initialize olayindan cozulur.
+        Tekrarli okuma yapacaksan w3'u disaridan ver - yoksa her cagride yeni baglanti
+        acilir ve chain_id dogrulamasi icin fazladan istek harcanir.
+
+
+6.5 swaps.py - alim ve satim
+
+Fiyat okumadan KASITLI olarak ayri tutuldu. Fiyat takibi cuzdana hic dokunmamalidir -
+hem guvenlik hem pratiklik acisindan. Kutuphane private key'i kendisi hic okumaz,
+hazir bir hesap (account) alir; anahtari nasil sakladigin (keyring, env, donanim)
+senin bilecegin istir.
+
+    TxResult
+        Islem sonucu: success, tx_hash, error, amount_out. Hata firlatmak yerine
+        tasinir, boylece izleme dongusu cokmeden loglayip tekrar deneyebilir.
+        "if result:" seklinde dogrudan kontrol edilebilir.
+
+    Swapper(chain, account, w3=None)
+
+    v3_variant()
+        Bu chain'in hangi V3 router arayuzunu kullandigi. Config'de yazmiyorsa
+        bytecode'dan bir kez tespit edilir ve saklanir.
+
+    allowance(token, spender) / ensure_allowance(...)
+        Router'in tokeni harcamasina izin verir. Varsayilan SINIRSIZ izindir - boylece
+        her satistan once degil, omurde bir kez islem gonderilir. Karsiliginda router
+        o token uzerinde surekli yetkiye sahip olur; adresini dogruladigin bir router
+        icin kabul edilebilir, istemezsen unlimited=False ile sadece o islem kadar
+        izin verilir.
+
+    simulate(pool, token_in, amount_in)
+        Zincire "bu islem ne dondurur" diye sorar (eth_call). Hicbir sey gondermez,
+        hicbir seyi degistirmez, ucretsizdir. Komisyon, fiyat etkisi ve varsa transfer
+        vergisi otomatik dahildir - minimum cikti hesabinin dogru temeli budur.
+
+        Iki nokta:
+        - Satis simulasyonu allowance ISTER, cunku router transferFrom yapar. Bu
+          yuzden sell() once approve eder, sonra simule eder.
+        - Alim simulasyonu, cuzdanda para olmasa bile calisir. Normalde dugum bakiye
+          kontrolu yapip reddeder; kutuphane state_override kullanarak "bu cagri icin
+          bakiye varmis gibi davran" der. Boylece "5 ETH'im olsa ne alirdim" sorusu
+          icin once 5 ETH'e sahip olmak gerekmez.
+
+    buy(pool, amount_in, slippage_pct, min_out, fee_on_transfer, deadline_seconds)
+        Native coin harcayip token alir. Approve YOKTUR - native para msg.value olarak
+        gider ve router onu sarmalar, ortada kimsenin izin vermesi gereken bir ERC20
+        yoktur.
+
+    sell(pool, amount_in, ..., unwrap=True, approve=True, unlimited_approve=True)
+        Tokeni satip native coine doner. Once approve edilir (router tokenlari
+        cuzdandan cekecek), sonra simule edilir, sonra gonderilir.
+        unwrap=True cikti olarak sarmalanmis token yerine native coin verir. V2'de bu
+        bedavadir (swapExactTokensForETH zaten cozer). V3'te router'a ayrica soylemek
+        gerekir; kutuphane swap'in ardina unwrapWETH9 cagrisini ekleyerek yapar. Aksi
+        halde para WHYPE/WETH olarak kalir - HyperEVM'de yasadigin durum buydu.
+
+ALIM ve SATIM NEDEN AYRI METODLAR
+
+Gercekten farkli isler oldugu icin. Tek bir swap(yon=...) fonksiyonuna zorlamak,
+dallanmayi fonksiyonun icine tasimaktan baska bir ise yaramazdi:
+
+                    alim (taban -> token)      satim (token -> taban)
+    girdi           native coin, msg.value     ERC20
+    approve         gerekmez                   gerekli
+    cikti           ERC20                      sarmalanmis, unwrap gerekebilir
+    V2 fonksiyonu   swapExactETHForTokens      swapExactTokensForETH
+
+Yasadigimiz iki sorunun (surekli approve, cikti WHYPE olarak kalmasi) ikisinin de
+satim tarafinda olmasi tesaduf degil - asil asimetri orada.
+
+VERGILI ("SLIPAJLI") TOKENLER
+
+Bazi tokenlar her transferde kesinti yapar. V2'de standart swap fonksiyonlari miktari
+kati sekilde dogruladigi icin bu tokenlerde islem geri doner. Bunun icin router'da
+"...SupportingFeeOnTransferTokens" adli varyantlar vardir; onlar miktar dogrulamak
+yerine bakiyeyi transfer oncesi/sonrasi olcer.
+
+    fee_on_transfer=True
+
+Bu varyantlari kullandirir. Normal tokenlerde de zararsizdir, sadece biraz daha fazla
+gas harcar.
+
+V3'te bu fonksiyonlarin karsiligi YOKTUR - V3'un callback mimarisi kesin miktar
+bekler. Yani bu konu V2'ye ozguydur. V4'te ise ayni ihtiyac "hook" olarak karsimiza
+cikar: Robinhood'da bulunan o ortak hook (afterSwap + afterSwapReturnsDelta aktif)
+aslinda V4'un transfer vergisi yapma bicimidir.
+
+
+7. YENI BIR CHAIN EKLEME
+--------------------------------------------------------------------------------
+
+Adim adim, ve en onemlisi: ADRESLERI MUTLAKA ZINCIRDE DOGRULA.
+
+Bu uc chain'in HEPSINDE dokumantasyonda yazan en az bir adres yanlis cikti. Birinde
+(HyperSwap V2 router) verilen adreste o chain'de hic kontrat yoktu.
+
+  1. chain_id ve RPC'yi dogrula:
+        w3 = Web3(Web3.HTTPProvider(rpc)); w3.eth.chain_id
+
+  2. Wrapped native tokeni dogrula: symbol() cagir, beklediginle eslesiyor mu.
+
+  3. V4 varsa StateView'i dogrula: poolManager() cagir, resmi PoolManager adresiyle
+     esles.
+
+  4. Router'lari dogrula: get_code ile bytecode al, bekledigin fonksiyonlarin
+     selector'lari iceride mi bak. V3'te hangi arayuz varyanti oldugunu da boyle
+     anlarsin.
+
+  5. Bulamadigin adresi None birak. Kutuphane net hata verir; uydurma bir adrese
+     islem gondermekten cok daha iyidir.
+
+  6. chains.py'ye ChainConfig yaz, CHAINS'e ekle.
+
+Not: V2 fiyat okuma icin router GEREKMEZ (kapali-form formul var). Router sadece V2
+swap icin lazimdir. HyperEVM'de router bulunamadi ama V2 fiyat okuma calisiyor.
+
+
+8. BILINEN KISITLAR
+--------------------------------------------------------------------------------
+
+V4 SWAP YOK. Fiyat okuma calisir, alim/satim desteklenmez. Sebep mimari: V4'te
+havuzlar tek bir PoolManager icinde yasar ve dogrudan swap unlock/unlockCallback
+mekanizmasi ister - yani PoolManager senin KENDI kontratini geri cagirir. Siradan bir
+cuzdandan (EOA) bunu yapamazsin. Pratik yol Universal Router uzerinden gecmektir, o da
+ayri bir encode katmani demektir (Elnaril'in kutuphanesi tam bunun icin vardir).
+
+V3/V4 QUOTE'LARI TAHMINDIR. Kesin sonuc icin simulate() kullanilmali.
+
+PUBLIC RPC LIMITLERI. HyperEVM'in public RPC'si dakikada 100 istek; Base'in resmi
+RPC'si (mainnet.base.org) hizli 429 veriyor, bu yuzden config'de publicnode tercih
+edildi. Siki dongulerde w3'u bir kez olusturup paylas.
+
+V4 POOL KEY ARAMASI BASTAN TARAR. fromBlock=0 varsayilani; buyuk chain'lerde
+from_block vermek gerekebilir.
+
+
+9. TEST
+--------------------------------------------------------------------------------
+
+    python tests/test_pricing.py
+
+14 test, ag gerektirmez. Saf matematigin test edilmesi onemlidir cunku buradaki bir
+yon hatasi hata vermez, sadece makul gorunen yanlis bir sayi uretir. Nitekim testlerin
+biri ilk yazildiginda hatali cikti (1 wei girdinin tamsayi bolmesiyle 0 verdigi
+atlanmisti) ve o davranis ayrica sabitlendi.
