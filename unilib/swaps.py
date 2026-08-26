@@ -24,6 +24,9 @@ from . import abis
 from .chains import NATIVE_ADDRESS
 
 MAX_UINT256 = 2**256 - 1
+# Permit2 stores allowances in narrower slots than a normal ERC20 approval.
+MAX_UINT160 = 2**160 - 1
+MAX_UINT48 = 2**48 - 1
 DEFAULT_DEADLINE_SECONDS = 120
 DEFAULT_SLIPPAGE_PCT = 0.5
 
@@ -59,6 +62,7 @@ class Swapper:
         self.account = account
         self.w3 = w3 or chain.connect()
         self._v3_variant_cache = None
+        self._codec_cache = None
 
     @property
     def address(self):
@@ -125,7 +129,40 @@ class Swapper:
             return self._v3_router()
         if pool.pool_type == "v2":
             return self._v2_router()
-        raise NotImplementedError(_v4_message(self.chain))
+        return None  # V4 goes through the Universal Router, handled separately
+
+    def _codec(self):
+        """
+        Encoder for Universal Router calldata.
+
+        V4 pools have no router of their own: swapping means sending the Universal
+        Router a list of commands plus their ABI-encoded inputs. That encoding is
+        fiddly and fails silently when wrong, so it is delegated to a library built
+        for it rather than hand-rolled here.
+        """
+        if self._codec_cache is None:
+            try:
+                from uniswap_universal_router_decoder import RouterCodec
+            except ImportError:
+                raise ImportError(
+                    "V4 swaps need the uniswap-universal-router-decoder package: "
+                    "pip install uniswap-universal-router-decoder"
+                )
+            self._codec_cache = RouterCodec(w3=self.w3)
+        return self._codec_cache
+
+    def _v4_pool_key(self, pool):
+        """pool.pool_key as the codec's own PoolKey object."""
+        currency0, currency1, fee, tick_spacing, hooks = pool.pool_key
+        return self._codec().encode.v4_pool_key(currency0, currency1, fee, tick_spacing, hooks)
+
+    def _require_universal_router(self):
+        if not self.chain.universal_router:
+            raise ValueError(
+                f"{self.chain.name} icin universal_router adresi tanimli degil - "
+                "V4 swap yapilamaz"
+            )
+        return Web3.to_checksum_address(self.chain.universal_router)
 
     # -- allowance ----------------------------------------------------------
 
@@ -163,6 +200,61 @@ class Swapper:
             return TxResult(success=receipt.status == 1, tx_hash=receipt.transactionHash.hex())
         except Exception as e:
             return TxResult(success=False, error=f"approve basarisiz: {e}")
+
+    def permit2_allowance(self, token_address, spender):
+        """(amount, expiration, nonce) that Permit2 currently grants this spender."""
+        permit2 = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self.chain.permit2), abi=abis.PERMIT2_ABI
+        )
+        return permit2.functions.allowance(
+            self.address,
+            Web3.to_checksum_address(token_address),
+            Web3.to_checksum_address(spender),
+        ).call()
+
+    def ensure_permit2_allowance(self, token_address, amount_wei, spender):
+        """
+        Give the Universal Router permission to move a token, the V4 way.
+
+        Permission is two-layered and both layers must be in place:
+
+          1. the token is approved to Permit2 (a normal ERC20 approve)
+          2. Permit2 is told that this spender may move up to N until some expiry
+
+        Each layer costs a transaction the first time and nothing afterwards, since
+        both are set to their maximum. A plain ERC20 approve to the router alone does
+        not work - the router never calls transferFrom itself.
+
+        Returns a TxResult; already-permitted is a success with no tx_hash.
+        """
+        if not self.chain.permit2:
+            return TxResult(success=False,
+                            error=f"{self.chain.name} icin permit2 adresi tanimli degil")
+
+        permit2_address = Web3.to_checksum_address(self.chain.permit2)
+        try:
+            # Layer 1: token -> Permit2
+            approval = self.ensure_allowance(token_address, amount_wei, permit2_address)
+            if not approval:
+                return approval
+
+            # Layer 2: Permit2 -> spender
+            allowed, expiration, _nonce = self.permit2_allowance(token_address, spender)
+            if allowed >= amount_wei and expiration > time.time():
+                return TxResult(success=True, tx_hash=approval.tx_hash)
+
+            permit2 = self.w3.eth.contract(address=permit2_address, abi=abis.PERMIT2_ABI)
+            tx = permit2.functions.approve(
+                Web3.to_checksum_address(token_address),
+                Web3.to_checksum_address(spender),
+                MAX_UINT160,
+                MAX_UINT48,
+            ).build_transaction(self._tx_params())
+            receipt = self._sign_and_send(tx)
+            return TxResult(success=receipt.status == 1,
+                            tx_hash=receipt.transactionHash.hex())
+        except Exception as e:
+            return TxResult(success=False, error=f"permit2 approve basarisiz: {e}")
 
     # -- simulation ---------------------------------------------------------
 
@@ -222,8 +314,15 @@ class Swapper:
                 amounts = router.functions.getAmountsOut(amount_in_wei, path).call()
                 return amounts[-1] / 10**decimals_out
 
-            raise NotImplementedError(_v4_message(self.chain))
-        except NotImplementedError:
+            if pool.pool_type == "v4":
+                # V4 has no router to simulate against - the pool lives inside the
+                # PoolManager. The dedicated quoter runs the real swap instead, hook
+                # included, which matters here: a hooked pool can charge its own cut
+                # while reporting fee=0.
+                return pool.quote_exact(token_in, amount_in_wei / 10**decimals_in)
+
+            raise ValueError(f"bilinmeyen pool tipi: {pool.pool_type}")
+        except ValueError:
             raise
         except Exception:
             return None
@@ -296,8 +395,12 @@ class Swapper:
         # problem, not a failed trade, so it should raise rather than come back as a
         # retryable TxResult that no amount of retrying will fix.
         router = self._router_for(pool)
+        if pool.pool_type == "v4":
+            self._require_universal_router()
 
-        token_in = self.chain.wrapped_native
+        # V4 prices in the native coin itself (currency zero-address), the other
+        # versions in its wrapped form.
+        token_in = pool.base if pool.pool_type == "v4" else self.chain.wrapped_native
         min_out_human, expected = self._min_out(pool, token_in, amount_in, slippage_pct, min_out)
 
         amount_in_wei = int(amount_in * 10**18)
@@ -305,7 +408,11 @@ class Swapper:
         deadline = int(time.time()) + deadline_seconds
 
         try:
-            if pool.pool_type == "v3":
+            if pool.pool_type == "v4":
+                tx = self._v4_swap_tx(
+                    pool, token_in, amount_in_wei, min_out_wei, deadline, native_value=True
+                )
+            elif pool.pool_type == "v3":
                 params = self._exact_input_params(
                     self.chain.wrapped_native, pool.token, pool.fee,
                     self.address, amount_in_wei, min_out_wei, deadline,
@@ -326,7 +433,7 @@ class Swapper:
                     self._tx_params(value=amount_in_wei)
                 )
             else:
-                raise NotImplementedError(_v4_message(self.chain))
+                raise ValueError(f"bilinmeyen pool tipi: {pool.pool_type}")
 
             receipt = self._sign_and_send(tx)
             return TxResult(
@@ -334,7 +441,9 @@ class Swapper:
                 tx_hash=receipt.transactionHash.hex(),
                 amount_out=expected,
             )
-        except NotImplementedError:
+        except (ValueError, ImportError):
+            # Configuration problems (missing router, missing package) are permanent -
+            # let them raise instead of coming back as a retryable failure.
             raise
         except Exception as e:
             return TxResult(success=False, error=str(e))
@@ -367,9 +476,17 @@ class Swapper:
         amount_in_wei = _resolve_wei(amount_in, amount_in_wei, pool.decimals)
 
         if approve:
-            approval = self.ensure_allowance(
-                pool.token, amount_in_wei, router.address, unlimited=unlimited_approve
-            )
+            if pool.pool_type == "v4":
+                # V4 sells go through the Universal Router, which moves tokens via
+                # Permit2 rather than pulling them itself - a plain approve is not
+                # enough and would leave the swap reverting.
+                approval = self.ensure_permit2_allowance(
+                    pool.token, amount_in_wei, self._require_universal_router()
+                )
+            else:
+                approval = self.ensure_allowance(
+                    pool.token, amount_in_wei, router.address, unlimited=unlimited_approve
+                )
             if not approval:
                 return approval
 
@@ -380,7 +497,14 @@ class Swapper:
         deadline = int(time.time()) + deadline_seconds
 
         try:
-            if pool.pool_type == "v3":
+            if pool.pool_type == "v4":
+                # No unwrap step: in V4 the native coin is a currency in its own right,
+                # so the proceeds arrive native already.
+                tx = self._v4_swap_tx(
+                    pool, pool.token, amount_in_wei, min_out_wei, deadline,
+                    native_value=False,
+                )
+            elif pool.pool_type == "v3":
                 # When unwrapping, proceeds must land on the router first so it has
                 # something to unwrap, then unwrapWETH9 forwards the native coin on.
                 recipient = router.address if unwrap else self.address
@@ -408,7 +532,7 @@ class Swapper:
                     amount_in_wei, min_out_wei, path, self.address, deadline
                 ).build_transaction(self._tx_params())
             else:
-                raise NotImplementedError(_v4_message(self.chain))
+                raise ValueError(f"bilinmeyen pool tipi: {pool.pool_type}")
 
             receipt = self._sign_and_send(tx)
             return TxResult(
@@ -416,12 +540,54 @@ class Swapper:
                 tx_hash=receipt.transactionHash.hex(),
                 amount_out=expected,
             )
-        except NotImplementedError:
+        except (ValueError, ImportError):
+            # Configuration problems (missing router, missing package) are permanent -
+            # let them raise instead of coming back as a retryable failure.
             raise
         except Exception as e:
             return TxResult(success=False, error=str(e))
 
     # -- plumbing -----------------------------------------------------------
+
+    def _v4_swap_tx(self, pool, token_in, amount_in_wei, min_out_wei, deadline,
+                    native_value=False):
+        """
+        Build a V4 swap as a Universal Router transaction.
+
+        V4 settles in deltas rather than transfers: the swap records what is owed and
+        what is due, then SETTLE_ALL pays the input side and TAKE_ALL collects the
+        output. All three go in one command list, executed atomically.
+
+        native_value=True sends the input as msg.value - the buy case, where the input
+        is the chain's native coin and there is nothing to approve. Selling instead
+        needs the router to already hold permission through Permit2.
+        """
+        ur_address = self._require_universal_router()
+        codec = self._codec()
+
+        token_out = pool.token1 if token_in.lower() == pool.token0.lower() else pool.token0
+        zero_for_one = token_in.lower() == pool.token0.lower()
+
+        return (
+            codec.encode.chain()
+            .v4_swap()
+            .swap_exact_in_single(
+                pool_key=self._v4_pool_key(pool),
+                zero_for_one=zero_for_one,
+                amount_in=amount_in_wei,
+                amount_out_min=min_out_wei,
+            )
+            .settle_all(Web3.to_checksum_address(token_in), amount_in_wei)
+            .take_all(Web3.to_checksum_address(token_out), min_out_wei)
+            .build_v4_swap()
+            .build_transaction(
+                self.address,
+                amount_in_wei if native_value else 0,
+                ur_address=ur_address,
+                deadline=deadline,
+                chain_id=self.chain.chain_id,
+            )
+        )
 
     def _v3_tx(self, router, swap_fn, deadline, extra=None, value=0):
         """
@@ -486,11 +652,3 @@ def _resolve_wei(amount_in, amount_in_wei, decimals):
         raise ValueError("amount_in ya da amount_in_wei verilmeli")
     return int(amount_in * 10**decimals)
 
-
-def _v4_message(chain):
-    return (
-        "V4 swap henuz desteklenmiyor. V4'te havuzlar tek bir PoolManager icinde "
-        "yasiyor ve dogrudan swap icin unlock/callback mimarisi gerekiyor; siradan "
-        "bir cuzdandan islem yapmanin yolu Universal Router uzerinden gecmek. "
-        f"{chain.name} icin Universal Router adresi de henuz tanimli degil."
-    )

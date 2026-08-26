@@ -201,6 +201,40 @@ V4_QUOTER_ABI = [
     },
 ]
 
+# Permit2: the shared approval contract the Universal Router uses instead of pulling
+# tokens itself. Permission is two-layered - the token is approved to Permit2 once,
+# then Permit2 is told which spender may move how much, until when. Only the
+# allowance-transfer half is needed here; the signature half is for gasless permits.
+PERMIT2_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "", "type": "address"},
+            {"internalType": "address", "name": "", "type": "address"},
+            {"internalType": "address", "name": "", "type": "address"},
+        ],
+        "name": "allowance",
+        "outputs": [
+            {"internalType": "uint160", "name": "amount", "type": "uint160"},
+            {"internalType": "uint48", "name": "expiration", "type": "uint48"},
+            {"internalType": "uint48", "name": "nonce", "type": "uint48"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "token", "type": "address"},
+            {"internalType": "address", "name": "spender", "type": "address"},
+            {"internalType": "uint160", "name": "amount", "type": "uint160"},
+            {"internalType": "uint48", "name": "expiration", "type": "uint48"},
+        ],
+        "name": "approve",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
 # Two incompatible V3 router interfaces exist in the wild:
 #
 #   "classic" (ISwapRouter)  - deadline is a field inside the params struct
