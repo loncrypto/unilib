@@ -25,6 +25,7 @@ from .pools import (
     fetch_v4_pool_key,
     get_pool_manager,
     load_pool,
+    restore_pool,
 )
 from .swaps import Swapper, TxResult
 
@@ -46,6 +47,7 @@ __all__ = [
     "fetch_v4_pool_key",
     "get_pool_manager",
     "load_pool",
+    "restore_pool",
     "Swapper",
     "TxResult",
     "pricing",

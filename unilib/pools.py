@@ -222,6 +222,28 @@ class Pool:
             return amount_in * price_1
         raise ValueError(f"{token_in} bu pool'un tokenlarindan biri degil")
 
+    def metadata(self):
+        """
+        Everything about this pool that does not change, as a plain dict.
+
+        Pairs with restore_pool(): save this once when a pool is first added, and
+        later rebuilds cost no chain reads at all. Discovering a pool takes several
+        sequential RPC calls - probing the version, reading token0/token1, then symbol
+        and decimals for each side - and none of those answers ever change.
+
+        Only the price is worth re-reading, and that is one call.
+        """
+        return {
+            "pool_type": self.pool_type,
+            "identifier": self.identifier,
+            "token0": self.token0,
+            "token1": self.token1,
+            "decimals0": self.decimals0,
+            "decimals1": self.decimals1,
+            "symbol0": self.symbol0,
+            "symbol1": self.symbol1,
+        }
+
     def __repr__(self):
         pair = f"{self.symbol0}/{self.symbol1}"
         return f"<{type(self).__name__} {pair}>"
@@ -238,6 +260,10 @@ class V2Pool(Pool):
 
     pool_type = "v2"
     exact_quotes = True
+
+    @property
+    def identifier(self):
+        return self.address
 
     def __init__(self, w3, chain, address, **kwargs):
         self.address = Web3.to_checksum_address(address)
@@ -289,6 +315,13 @@ class V3Pool(Pool):
 
     pool_type = "v3"
 
+    @property
+    def identifier(self):
+        return self.address
+
+    def metadata(self):
+        return {**super().metadata(), "fee": self.fee}
+
     def __init__(self, w3, chain, address, fee=None, **kwargs):
         self.address = Web3.to_checksum_address(address)
         self.contract = w3.eth.contract(address=self.address, abi=abis.V3_POOL_ABI)
@@ -314,6 +347,14 @@ class V4Pool(Pool):
     """
 
     pool_type = "v4"
+
+    @property
+    def identifier(self):
+        return self.pool_id
+
+    def metadata(self):
+        return {**super().metadata(), "fee": self.fee,
+                "tick_spacing": self.tick_spacing, "hooks": self.hooks}
 
     def __init__(self, w3, chain, pool_id, fee, tick_spacing, hooks, **kwargs):
         if not chain.state_view:
@@ -362,6 +403,16 @@ class V4Pool(Pool):
         """
         if not self.chain.v4_quoter:
             return None
+
+        # Checked rather than assumed: treating "not token0" as token1 turns a wrong
+        # address into a confident answer for the opposite direction. On V4 the base
+        # is often the native coin, so passing the wrapped address lands here.
+        if token_in.lower() not in (self.token0.lower(), self.token1.lower()):
+            raise ValueError(
+                f"{token_in} is not in this pool ({self.symbol0}/{self.symbol1}). "
+                "On V4 the base side may be the native coin - pass pool.base rather "
+                "than the wrapped address."
+            )
 
         zero_for_one = token_in.lower() == self.token0.lower()
         decimals_in = self.decimals0 if zero_for_one else self.decimals1
@@ -429,3 +480,45 @@ def load_pool(chain, identifier, w3=None, from_block=0):
         f"Girilen deger ({len(hex_part)} hex karakter) ne pool adresine (40) "
         "ne de V4 pool id'ye (64) benziyor"
     )
+
+
+POOL_CLASSES = {"v2": V2Pool, "v3": V3Pool, "v4": V4Pool}
+
+
+def restore_pool(chain, metadata, w3=None):
+    """
+    Rebuild a pool from a saved metadata() dict, without asking the chain anything.
+
+    Discovering a pool costs several sequential RPC calls - probe the version, read
+    token0/token1, then symbol and decimals for each side. On a slow endpoint that is
+    seconds of waiting before the first price appears. None of those answers change
+    though, so once a pool is known there is no reason to look them up again.
+
+        entry = pool.metadata()      # save this when the token is first added
+        pool = restore_pool(chain, entry, w3=w3)
+
+    Raises KeyError if the dict is missing fields, so a caller can fall back to
+    load_pool() when an old registry predates this.
+    """
+    pool_type = metadata["pool_type"]
+    cls = POOL_CLASSES.get(pool_type)
+    if cls is None:
+        raise ValueError(f"bilinmeyen pool tipi: {pool_type}")
+
+    w3 = w3 or chain.connect()
+    common = {
+        "token0": metadata["token0"],
+        "token1": metadata["token1"],
+        "decimals0": metadata["decimals0"],
+        "decimals1": metadata["decimals1"],
+        "symbol0": metadata["symbol0"],
+        "symbol1": metadata["symbol1"],
+    }
+
+    if pool_type == "v4":
+        return V4Pool(w3, chain, metadata["identifier"], metadata["fee"],
+                      metadata["tick_spacing"], metadata["hooks"], **common)
+    if pool_type == "v3":
+        # fee passed in, so V3Pool skips its own fee() call too.
+        return V3Pool(w3, chain, metadata["identifier"], fee=metadata["fee"], **common)
+    return V2Pool(w3, chain, metadata["identifier"], **common)
