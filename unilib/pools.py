@@ -331,12 +331,51 @@ class V4Pool(Pool):
     def has_hooks(self):
         return self.hooks.lower() != NATIVE_ADDRESS
 
+    @property
+    def pool_key(self):
+        """The PoolKey tuple, in the order the contracts expect it."""
+        return (
+            Web3.to_checksum_address(self.token0),
+            Web3.to_checksum_address(self.token1),
+            self.fee,
+            self.tick_spacing,
+            Web3.to_checksum_address(self.hooks),
+        )
+
     def slot0(self):
         return self.state_view.functions.getSlot0(self.pool_id).call()
 
     def _prices(self):
         sqrt_price_x96, _tick, *_ = self.slot0()
         return pricing.sqrt_price_x96_to_prices(sqrt_price_x96, self.decimals0, self.decimals1)
+
+    def quote_exact(self, token_in, amount_in, hook_data=b""):
+        """
+        Ask the V4 quoter what this swap really returns.
+
+        Worth preferring over quote() on this version especially: a hooked pool can
+        charge through the hook while reporting fee=0, so the spot price understates
+        the cost. The quoter runs the actual swap logic, hook included.
+
+        Needs chain.v4_quoter to be set. Returns None if the quoter is unavailable or
+        the call reverts, so callers can fall back to the spot estimate.
+        """
+        if not self.chain.v4_quoter:
+            return None
+
+        zero_for_one = token_in.lower() == self.token0.lower()
+        decimals_in = self.decimals0 if zero_for_one else self.decimals1
+        decimals_out = self.decimals1 if zero_for_one else self.decimals0
+
+        quoter = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self.chain.v4_quoter), abi=abis.V4_QUOTER_ABI
+        )
+        params = (self.pool_key, zero_for_one, int(amount_in * 10**decimals_in), hook_data)
+        try:
+            amount_out, _gas = quoter.functions.quoteExactInputSingle(params).call()
+            return amount_out / 10**decimals_out
+        except Exception:
+            return None
 
 
 def load_pool(chain, identifier, w3=None, from_block=0):

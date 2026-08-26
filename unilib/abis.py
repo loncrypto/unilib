@@ -151,6 +151,56 @@ STATE_VIEW_ABI = [
 # fee / tickSpacing / hooks from an id alone.
 V4_INITIALIZE_EVENT = "Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)"
 
+# V4Quoter: the only honest way to price a V4 swap. slot0 gives a spot price, but on a
+# hooked pool the hook can take its own cut - a pool reporting fee=0 is not free - and
+# the quoter runs the real thing, hook included.
+#
+# It is declared nonpayable rather than view because it actually executes the swap
+# inside the PoolManager and reverts at the end. Called through eth_call that is
+# harmless: nothing is committed, and the return value comes back normally.
+V4_QUOTER_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    {
+                        "components": [
+                            {"internalType": "address", "name": "currency0", "type": "address"},
+                            {"internalType": "address", "name": "currency1", "type": "address"},
+                            {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                            {"internalType": "int24", "name": "tickSpacing", "type": "int24"},
+                            {"internalType": "address", "name": "hooks", "type": "address"},
+                        ],
+                        "internalType": "struct PoolKey",
+                        "name": "poolKey",
+                        "type": "tuple",
+                    },
+                    {"internalType": "bool", "name": "zeroForOne", "type": "bool"},
+                    {"internalType": "uint128", "name": "exactAmount", "type": "uint128"},
+                    {"internalType": "bytes", "name": "hookData", "type": "bytes"},
+                ],
+                "internalType": "struct IV4Quoter.QuoteExactSingleParams",
+                "name": "params",
+                "type": "tuple",
+            },
+        ],
+        "name": "quoteExactInputSingle",
+        "outputs": [
+            {"internalType": "uint256", "name": "amountOut", "type": "uint256"},
+            {"internalType": "uint256", "name": "gasEstimate", "type": "uint256"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "poolManager",
+        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
 # Two incompatible V3 router interfaces exist in the wild:
 #
 #   "classic" (ISwapRouter)  - deadline is a field inside the params struct
