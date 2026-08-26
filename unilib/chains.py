@@ -50,6 +50,13 @@ class ChainConfig:
     # the quoter is the purpose-built tool and needs no balance or allowance.
     v3_quoter: str | None = None
 
+    # V4 has no per-pool contract to call, so swapping goes through the Universal
+    # Router and quoting through a dedicated V4 quoter. Permit2 is how the Universal
+    # Router is given permission to move ERC20s - a plain approve is not enough.
+    universal_router: str | None = None
+    permit2: str | None = None
+    v4_quoter: str | None = None
+
     # Uniswap V2 charges 0.3% (997/1000). Forks differ - PancakeSwap uses 0.25%.
     # A wrong value here silently skews every V2 quote, so it belongs with the chain.
     v2_fee_numerator: int = 997
@@ -63,7 +70,8 @@ class ChainConfig:
     def __post_init__(self):
         # Address comparison bugs are silent and nasty, so normalise once here
         # rather than sprinkling .lower() through every call site.
-        for attr in ("wrapped_native", "state_view", "v3_router", "v2_router", "v3_quoter"):
+        for attr in ("wrapped_native", "state_view", "v3_router", "v2_router",
+                     "v3_quoter", "universal_router", "permit2", "v4_quoter"):
             value = getattr(self, attr)
             if value is not None:
                 object.__setattr__(self, attr, Web3.to_checksum_address(value))
@@ -134,13 +142,24 @@ ROBINHOOD = ChainConfig(
     rpc_url="https://rpc.mainnet.chain.robinhood.com",
     wrapped_native="0x0bd7d308f8e1639fab988df18a8011f41eacad73",
     native_symbol="ETH",
-    # Official Uniswap V4 deployment - PoolManager is discoverable from StateView.
+    # Official Uniswap deployment. Every address below was checked on-chain, not just
+    # taken from the docs - which themselves warn that addresses no longer match
+    # across chains.
+    #
+    # V4: PoolManager is 0x8366a39CC670B4001A1121B8F6A443A643e40951, reachable from
+    # StateView.poolManager(), so it is not stored separately.
     state_view="0xf3334192d15450cdd385c8b70e03f9a6bd9e673b",
-    # Found by looking at what successful swaps on a live V2 pool actually call, then
-    # verified: has all four swap functions (including the fee-on-transfer variants),
-    # its factory() matches the pool's, and its WETH() matches wrapped_native.
+    v4_quoter="0x8dc178efb8111bb0973dd9d722ebeff267c98f94",
+    universal_router="0x8876789976decbfcbbbe364623c63652db8c0904",
+    permit2="0x000000000022D473030F116dDEE9F6B43aC78BA3",
+    # V3: SwapRouter02 interface (deadline outside the params struct).
+    v3_router="0xcaf681a66d020601342297493863e78c959e5cb2",
+    v3_router_variant="router02",
+    v3_quoter="0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
+    # V2 is not an official Uniswap deployment here; this router was found by looking
+    # at what successful swaps on a live V2 pool actually call, then verified against
+    # the pool's factory and WETH.
     v2_router="0x89e5DB8B5aA49aA85AC63f691524311AEB649eba",
-    # v3_router still unverified on this chain.
 )
 
 HYPEREVM = ChainConfig(
