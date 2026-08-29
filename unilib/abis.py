@@ -192,6 +192,42 @@ V4_QUOTER_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    # Multi-hop counterpart. A path entry names the currency each hop swaps INTO,
+    # plus the pool that hop goes through - so the route is described from the input
+    # forward, and the pool a hop uses is pinned by its key rather than searched for.
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"internalType": "address", "name": "exactCurrency", "type": "address"},
+                    {
+                        "components": [
+                            {"internalType": "address", "name": "intermediateCurrency",
+                             "type": "address"},
+                            {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                            {"internalType": "int24", "name": "tickSpacing", "type": "int24"},
+                            {"internalType": "address", "name": "hooks", "type": "address"},
+                            {"internalType": "bytes", "name": "hookData", "type": "bytes"},
+                        ],
+                        "internalType": "struct PathKey[]",
+                        "name": "path",
+                        "type": "tuple[]",
+                    },
+                    {"internalType": "uint128", "name": "exactAmount", "type": "uint128"},
+                ],
+                "internalType": "struct IV4Quoter.QuoteExactParams",
+                "name": "params",
+                "type": "tuple",
+            },
+        ],
+        "name": "quoteExactInput",
+        "outputs": [
+            {"internalType": "uint256", "name": "amountOut", "type": "uint256"},
+            {"internalType": "uint256", "name": "gasEstimate", "type": "uint256"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
     {
         "inputs": [],
         "name": "poolManager",

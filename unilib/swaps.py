@@ -547,6 +547,95 @@ class Swapper:
         except Exception as e:
             return TxResult(success=False, error=str(e))
 
+    # -- routes -------------------------------------------------------------
+
+    def swap_route(self, route, amount_in=None, slippage_pct=DEFAULT_SLIPPAGE_PCT,
+                   min_out=None, approve=True, unlimited_approve=True,
+                   deadline_seconds=DEFAULT_DEADLINE_SECONDS, amount_in_wei=None):
+        """
+        Send a whole route as one transaction.
+
+        Every hop settles inside the PoolManager, so the intermediate currency never
+        reaches the wallet: no approval for it, no balance in it, and nothing left
+        stranded if a later hop fails. The alternative - one transaction per hop - can
+        strand you holding the middle token when the second leg moves, and on this
+        chain that middle token may have no liquid way out at all.
+
+        min_out applies to the final output only. There is no useful floor to put on a
+        hop whose proceeds you never hold; what matters is what arrives at the end.
+
+        Approval is needed only when the input is an ERC20, and only through Permit2,
+        since the Universal Router moves tokens that way rather than pulling them
+        itself. A native input travels as msg.value and needs nothing.
+
+        Pass amount_in_wei when the figure came from the chain - a balance being sold
+        in full, typically. Converting it to a float and back does not round-trip, and
+        landing a single wei above the balance is enough for the transfer to fail.
+        """
+        ur_address = self._require_universal_router()
+        codec = self._codec()
+
+        currency_in = Web3.to_checksum_address(route.currency_in)
+        currency_out = Web3.to_checksum_address(route.token)
+        is_native_in = currency_in.lower() == NATIVE_ADDRESS
+
+        amount_in_wei = _resolve_wei(amount_in, amount_in_wei, route.base_decimals)
+        amount_in_human = amount_in_wei / 10**route.base_decimals
+
+        # The quoted figure is the floor's basis: it already carries the fees, the
+        # hooks and the price impact of this exact path at this exact size, none of
+        # which a per-pool estimate would see.
+        if min_out is None:
+            expected = route.quote(amount_in_human)
+            if expected is None:
+                return TxResult(success=False,
+                                error="rota fiyat vermiyor - bir adim calismiyor olabilir")
+            min_out_human = expected * (1 - slippage_pct / 100)
+        else:
+            expected, min_out_human = None, min_out
+        min_out_wei = int(min_out_human * 10**route.decimals)
+
+        if approve and not is_native_in:
+            approval = self.ensure_permit2_allowance(currency_in, amount_in_wei, ur_address)
+            if not approval:
+                return approval
+
+        deadline = int(time.time()) + deadline_seconds
+
+        try:
+            tx = (
+                codec.encode.chain()
+                .v4_swap()
+                .swap_exact_in(
+                    currency_in=currency_in,
+                    path_keys=route.path_keys(),
+                    amount_in=amount_in_wei,
+                    amount_out_min=min_out_wei,
+                )
+                .settle_all(currency_in, amount_in_wei)
+                .take_all(currency_out, min_out_wei)
+                .build_v4_swap()
+                .build_transaction(
+                    self.address,
+                    amount_in_wei if is_native_in else 0,
+                    ur_address=ur_address,
+                    deadline=deadline,
+                    chain_id=self.chain.chain_id,
+                )
+            )
+            receipt = self._sign_and_send(tx)
+            return TxResult(
+                success=receipt.status == 1,
+                tx_hash=receipt.transactionHash.hex(),
+                amount_out=expected,
+            )
+        except (ValueError, ImportError):
+            # Configuration problems are permanent - a missing router or a route with a
+            # non-V4 hop will not start working on the next attempt.
+            raise
+        except Exception as e:
+            return TxResult(success=False, error=str(e))
+
     # -- plumbing -----------------------------------------------------------
 
     def _v4_swap_tx(self, pool, token_in, amount_in_wei, min_out_wei, deadline,

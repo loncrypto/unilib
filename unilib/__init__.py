@@ -27,6 +27,7 @@ from .pools import (
     load_pool,
     restore_pool,
 )
+from .routes import Route
 from .swaps import Swapper, TxResult
 
 __version__ = "0.1.0"
@@ -48,6 +49,7 @@ __all__ = [
     "get_pool_manager",
     "load_pool",
     "restore_pool",
+    "Route",
     "Swapper",
     "TxResult",
     "pricing",
