@@ -549,6 +549,119 @@ class Swapper:
 
     # -- routes -------------------------------------------------------------
 
+    def _mixed_route_tx(self, route, amount_in_wei, min_out_wei, deadline):
+        """
+        Build a route that crosses Uniswap versions as one Universal Router call.
+
+        The router runs a command list, so versions can be mixed - but each pair of
+        neighbouring hops has to hand the intermediate token over, and each version
+        does that differently:
+
+          V3/V2 hops send their output to the router itself rather than the wallet,
+          and a hop after the first spends what the router already holds
+          (`..._from_balance`), so no amount has to be predicted.
+
+          V4 hops settle into the PoolManager first and then swap the resulting
+          credit. `CONTRACT_BALANCE` on the settle means "whatever arrived", and
+          `OPEN_DELTA` on the swap means "whatever that credit is" - which is what
+          keeps the handoff exact. Settling everything and then swapping a fixed
+          amount leaves an unresolved balance, and V4 rejects the whole call for it.
+
+        The last hop is the only one that gets a floor, and the only one that pays out
+        to the wallet. Putting a floor on an intermediate would be guarding a number
+        nobody ever holds.
+        """
+        from uniswap_universal_router_decoder import FunctionRecipient, V4Constants
+
+        codec = self._codec()
+        chain = codec.encode.chain()
+        wrapped = Web3.to_checksum_address(self.chain.wrapped_native)
+        native_in = route.currency_in.lower() == NATIVE_ADDRESS
+        last = len(route.pools) - 1
+
+        # A route whose last hop is V2 or V3 pays out the wrapped coin, because that
+        # is what those pools hold. Unwrapping is one more command and costs nothing,
+        # and leaving the wrapped form in the wallet would be an extra step the user
+        # has to undo by hand every time they sell.
+        unwrap_at_end = (route.token.lower() == wrapped.lower()
+                         and route.pools[-1].pool_type != "v4")
+
+        # V3 and V2 have no concept of the native coin. If the route starts there and
+        # its first hop is one of those, the coin is wrapped into the router first.
+        if native_in and route.pools[0].pool_type != "v4":
+            chain = chain.wrap_eth(FunctionRecipient.ROUTER, amount_in_wei)
+
+        for i, (pool, currency_in, currency_out) in enumerate(
+                zip(route.pools, route.currencies[:-1], route.currencies[1:])):
+            is_last = i == last
+            token_in = wrapped if currency_in.lower() == NATIVE_ADDRESS else currency_in
+            token_out = wrapped if currency_out.lower() == NATIVE_ADDRESS else currency_out
+            floor = min_out_wei if is_last else 0
+            # Proceeds that still need unwrapping stay with the router for one more
+            # command rather than going to the wallet wrapped.
+            to_wallet = is_last and not unwrap_at_end
+            recipient = FunctionRecipient.SENDER if to_wallet else FunctionRecipient.ROUTER
+
+            if pool.pool_type == "v3":
+                path = [Web3.to_checksum_address(token_in), pool.fee,
+                        Web3.to_checksum_address(token_out)]
+                if i == 0 and not native_in:
+                    # First hop with an ERC20 input: the router pulls from the wallet
+                    # through Permit2.
+                    chain = chain.v3_swap_exact_in(recipient, amount_in_wei, floor, path,
+                                                   payer_is_sender=True)
+                elif i == 0:
+                    # The wrapped coin is already sitting in the router.
+                    chain = chain.v3_swap_exact_in(recipient, amount_in_wei, floor, path,
+                                                   payer_is_sender=False)
+                else:
+                    chain = chain.v3_swap_exact_in_from_balance(recipient, floor, path)
+
+            elif pool.pool_type == "v2":
+                path = [Web3.to_checksum_address(token_in), Web3.to_checksum_address(token_out)]
+                if i == 0:
+                    chain = chain.v2_swap_exact_in(recipient, amount_in_wei, floor, path,
+                                                   payer_is_sender=not native_in)
+                else:
+                    chain = chain.v2_swap_exact_in_from_balance(recipient, floor, path)
+
+            elif pool.pool_type == "v4":
+                v4 = chain.v4_swap()
+                if i == 0:
+                    v4 = v4.settle(Web3.to_checksum_address(currency_in),
+                                   amount_in_wei, True)
+                else:
+                    v4 = v4.settle(Web3.to_checksum_address(currency_in),
+                                   V4Constants.CONTRACT_BALANCE.value, False)
+                v4 = v4.swap_exact_in_single(
+                    pool_key=self._v4_pool_key(pool),
+                    zero_for_one=currency_in.lower() == pool.token0.lower(),
+                    amount_in=V4Constants.OPEN_DELTA.value,
+                    amount_out_min=floor,
+                )
+                if to_wallet:
+                    v4 = v4.take_all(Web3.to_checksum_address(currency_out), floor)
+                else:
+                    # Leave it with the router so the next hop can spend it.
+                    v4 = v4.take(Web3.to_checksum_address(currency_out),
+                                 Web3.to_checksum_address(
+                                     "0x0000000000000000000000000000000000000002"),
+                                 V4Constants.OPEN_DELTA.value)
+                chain = v4.build_v4_swap()
+            else:
+                raise ValueError(f"bilinmeyen pool tipi: {pool.pool_type}")
+
+        if unwrap_at_end:
+            chain = chain.unwrap_weth(FunctionRecipient.SENDER, min_out_wei)
+
+        return chain.build_transaction(
+            self.address,
+            amount_in_wei if native_in else 0,
+            ur_address=self._require_universal_router(),
+            deadline=deadline,
+            chain_id=self.chain.chain_id,
+        )
+
     def swap_route(self, route, amount_in=None, slippage_pct=DEFAULT_SLIPPAGE_PCT,
                    min_out=None, approve=True, unlimited_approve=True,
                    deadline_seconds=DEFAULT_DEADLINE_SECONDS, amount_in_wei=None):
@@ -603,6 +716,15 @@ class Swapper:
         deadline = int(time.time()) + deadline_seconds
 
         try:
+            if not route.is_v4_only:
+                tx = self._mixed_route_tx(route, amount_in_wei, min_out_wei, deadline)
+                receipt = self._sign_and_send(tx)
+                return TxResult(
+                    success=receipt.status == 1,
+                    tx_hash=receipt.transactionHash.hex(),
+                    amount_out=expected,
+                )
+
             tx = (
                 codec.encode.chain()
                 .v4_swap()

@@ -45,14 +45,28 @@ class Route:
         current = self.currency_in
         for i, pool in enumerate(self.pools):
             sides = (pool.token0, pool.token1)
-            if current.lower() not in (s.lower() for s in sides):
+            held = self._as_pool_sees(current, pool)
+            if held.lower() not in (side.lower() for side in sides):
                 raise ValueError(
                     f"rota kopuk: {i + 1}. havuz ({pool.symbol0}/{pool.symbol1}) "
                     f"{self._symbol_of(current)} icermiyor"
                 )
-            nxt = sides[1] if current.lower() == sides[0].lower() else sides[0]
+            nxt = sides[1] if held.lower() == sides[0].lower() else sides[0]
             self.currencies.append(Web3.to_checksum_address(nxt))
             current = nxt
+
+    def _as_pool_sees(self, currency, pool):
+        """
+        The address this pool would use for a currency.
+
+        Only V4 knows the native coin as a currency of its own; V2 and V3 pools hold
+        the wrapped form. Without this a route starting in ETH cannot enter a V3 pool
+        at all, which would force the user to hold WETH before buying anything routed
+        - and the router wraps for free anyway.
+        """
+        if currency.lower() == NATIVE_ADDRESS and pool.pool_type != "v4":
+            return Web3.to_checksum_address(self.chain.wrapped_native)
+        return currency
 
     # -- identity -----------------------------------------------------------
 
@@ -103,6 +117,11 @@ class Route:
     def is_direct(self):
         return len(self.pools) == 1
 
+    @property
+    def is_v4_only(self):
+        """Whether the whole path lives in V4, and so can be quoted in one call."""
+        return all(pool.pool_type == "v4" for pool in self.pools)
+
     def reversed(self):
         """The same path walked the other way - selling rather than buying."""
         return Route(self.chain, self.token, list(reversed(self.pools)), w3=self.w3)
@@ -139,7 +158,7 @@ class Route:
         return [(k["intermediate_currency"], k["fee"], k["tick_spacing"],
                  k["hooks"], k["hook_data"]) for k in self.path_keys()]
 
-    def quote(self, amount_in):
+    def quote(self, amount_in, block=None):
         """
         What this route really pays, hooks and price impact included.
 
@@ -151,6 +170,9 @@ class Route:
         a dead hop, most often, which is worth surfacing rather than dressing up as a
         small number.
         """
+        if not self.is_v4_only:
+            return self._quote_by_hop(amount_in, block)
+
         if not self.chain.v4_quoter:
             return None
 
@@ -164,16 +186,68 @@ class Route:
                     (self.pools[0].pool_key,
                      self.currency_in.lower() == self.pools[0].token0.lower(),
                      amount_wei, b"")
-                ).call()
+                ).call(block_identifier=block or "latest")
             else:
                 out, _gas = quoter.functions.quoteExactInput(
                     (self.currency_in, self._quoter_path(), amount_wei)
-                ).call()
+                ).call(block_identifier=block or "latest")
         except Exception:
             return None
         return out / 10**self.decimals
 
-    def spot(self, amount_in):
+    def _quote_by_hop(self, amount_in, block=None):
+        """
+        Quote a path that spans more than one Uniswap version.
+
+        No single quoter covers V3 and V4, so each hop is asked of its own and the
+        answer feeds the next. That is not an approximation: an exact output is an
+        exact input for the hop after it. Chaining two single V4 quotes against one
+        multi-hop call agreed to the last digit when this was checked.
+
+        It does cost one round trip per hop instead of one for the path.
+        """
+        amount = amount_in
+        for pool, currency_in in zip(self.pools, self.currencies[:-1]):
+            amount = self._quote_hop(pool, currency_in, amount, block)
+            if amount is None:
+                return None
+        return amount
+
+    def _quote_hop(self, pool, currency_in, amount_in, block=None):
+        """One hop, asked of whichever quoter that version has."""
+        if pool.pool_type == "v4":
+            return pool.quote_exact(currency_in, amount_in, block=block)
+
+        if pool.pool_type == "v3":
+            if not self.chain.v3_quoter:
+                return None
+            # V3 has no notion of the native coin: its pools hold the wrapped form,
+            # so a route arriving as native asks about the wrapped address.
+            token_in = self.chain.wrapped_native \
+                if currency_in.lower() == NATIVE_ADDRESS else currency_in
+            token_out = pool.token1 if token_in.lower() == pool.token0.lower() else pool.token0
+            dec_in = self._decimals_of(currency_in)
+            dec_out = pool.decimals1 if token_in.lower() == pool.token0.lower() else pool.decimals0
+            quoter = self.w3.eth.contract(
+                address=Web3.to_checksum_address(self.chain.v3_quoter), abi=abis.V3_QUOTER_ABI
+            )
+            try:
+                out = quoter.functions.quoteExactInputSingle((
+                    Web3.to_checksum_address(token_in),
+                    Web3.to_checksum_address(token_out),
+                    int(amount_in * 10**dec_in),
+                    pool.fee,
+                    0,
+                )).call(block_identifier=block or "latest")[0]
+            except Exception:
+                return None
+            return out / 10**dec_out
+
+        # V2's own formula is exact - fee and price impact included - so the pool can
+        # answer for itself.
+        return pool.quote(self._as_pool_sees(currency_in, pool), amount_in, block=block)
+
+    def spot(self, amount_in, block=None):
         """
         The same trade priced hop by hop from each pool's own state.
 
@@ -183,15 +257,26 @@ class Route:
         """
         amount = amount_in
         for pool, currency_in in zip(self.pools, self.currencies[:-1]):
-            amount = pool.quote(currency_in, amount)
+            # Same translation the walk does: a V2 or V3 pool is asked about the
+            # wrapped form, since it has never heard of the native coin.
+            amount = pool.quote(self._as_pool_sees(currency_in, pool), amount, block=block)
         return amount
 
     def cost_pct(self, amount_in):
-        """How much worse the real answer is than the spot one, as a percentage."""
-        real = self.quote(amount_in)
+        """
+        How much worse the real answer is than the spot one, as a percentage.
+
+        Both sides are read at one settled block. Left on "latest" the two figures
+        come from different moments, and on a moving pool the difference stops being
+        cost - it reported -0.5% on a route that charges over 1%, which is not a
+        cheaper route but a meaningless subtraction. A few blocks back is used rather
+        than the head, so a reorg cannot make the two halves disagree either.
+        """
+        block = self.w3.eth.block_number - 2
+        real = self.quote(amount_in, block=block)
         if not real:
             return None
-        reference = self.spot(amount_in)
+        reference = self.spot(amount_in, block=block)
         return (1 - real / reference) * 100 if reference else None
 
     def __repr__(self):

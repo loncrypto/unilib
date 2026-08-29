@@ -237,6 +237,37 @@ V4_QUOTER_ABI = [
     },
 ]
 
+# QuoterV2 - the V3 counterpart of the V4 quoter. Same idea: it runs the real swap
+# and reverts to return the answer, so the figure includes the fee and the price
+# impact rather than describing the pool at rest.
+V3_QUOTER_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"internalType": "address", "name": "tokenIn", "type": "address"},
+                    {"internalType": "address", "name": "tokenOut", "type": "address"},
+                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                    {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"},
+                ],
+                "internalType": "struct IQuoterV2.QuoteExactInputSingleParams",
+                "name": "params",
+                "type": "tuple",
+            },
+        ],
+        "name": "quoteExactInputSingle",
+        "outputs": [
+            {"internalType": "uint256", "name": "amountOut", "type": "uint256"},
+            {"internalType": "uint160", "name": "sqrtPriceX96After", "type": "uint160"},
+            {"internalType": "uint32", "name": "initializedTicksCrossed", "type": "uint32"},
+            {"internalType": "uint256", "name": "gasEstimate", "type": "uint256"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
 # Permit2: the shared approval contract the Universal Router uses instead of pulling
 # tokens itself. Permission is two-layered - the token is approved to Permit2 once,
 # then Permit2 is told which spender may move how much, until when. Only the
