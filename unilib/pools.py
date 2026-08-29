@@ -181,8 +181,14 @@ class Pool:
 
     # -- prices -------------------------------------------------------------
 
-    def _prices(self):
-        """(price_0, price_1) for this pool - implemented per version."""
+    def _prices(self, block=None):
+        """
+        (price_0, price_1) for this pool - implemented per version.
+
+        `block` pins the read. Comparing two figures that came from different blocks
+        is how a cost ends up negative: the pool moved between the calls and the
+        difference stopped being about cost at all.
+        """
         raise NotImplementedError
 
     def price(self):
@@ -207,7 +213,7 @@ class Pool:
         self._require_resolved()
         return self.quote(self.base, amount_in)
 
-    def quote(self, token_in, amount_in):
+    def quote(self, token_in, amount_in, block=None):
         """
         Output for swapping `amount_in` of `token_in` into the other side.
 
@@ -215,7 +221,7 @@ class Pool:
         Unless exact_quotes is True this is a spot-price estimate: it ignores price
         impact and fees, so it reads high on anything but small trades.
         """
-        price_0, price_1 = self._prices()
+        price_0, price_1 = self._prices(block)
         if token_in.lower() == self.token0.lower():
             return amount_in * price_0
         elif token_in.lower() == self.token1.lower():
@@ -270,20 +276,21 @@ class V2Pool(Pool):
         self.contract = w3.eth.contract(address=self.address, abi=abis.V2_PAIR_ABI)
         super().__init__(w3, chain, **kwargs)
 
-    def reserves(self):
-        reserve0, reserve1, _ = self.contract.functions.getReserves().call()
+    def reserves(self, block=None):
+        reserve0, reserve1, _ = self.contract.functions.getReserves().call(
+            block_identifier=block or "latest")
         return reserve0, reserve1
 
-    def _prices(self):
-        reserve0, reserve1 = self.reserves()
+    def _prices(self, block=None):
+        reserve0, reserve1 = self.reserves(block)
         amount0 = reserve0 / 10**self.decimals0
         amount1 = reserve1 / 10**self.decimals1
         price_0 = amount1 / amount0
         return price_0, 1 / price_0
 
-    def quote(self, token_in, amount_in):
+    def quote(self, token_in, amount_in, block=None):
         """Exact output, including the pool's fee and the price impact of this trade."""
-        reserve0, reserve1 = self.reserves()
+        reserve0, reserve1 = self.reserves(block)
 
         if token_in.lower() == self.token0.lower():
             reserve_in, reserve_out = reserve0, reserve1
@@ -328,11 +335,11 @@ class V3Pool(Pool):
         self.fee = fee if fee is not None else self.contract.functions.fee().call()
         super().__init__(w3, chain, **kwargs)
 
-    def slot0(self):
-        return self.contract.functions.slot0().call()
+    def slot0(self, block=None):
+        return self.contract.functions.slot0().call(block_identifier=block or "latest")
 
-    def _prices(self):
-        sqrt_price_x96, _tick, *_ = self.slot0()
+    def _prices(self, block=None):
+        sqrt_price_x96, _tick, *_ = self.slot0(block)
         return pricing.sqrt_price_x96_to_prices(sqrt_price_x96, self.decimals0, self.decimals1)
 
 
@@ -383,14 +390,15 @@ class V4Pool(Pool):
             Web3.to_checksum_address(self.hooks),
         )
 
-    def slot0(self):
-        return self.state_view.functions.getSlot0(self.pool_id).call()
+    def slot0(self, block=None):
+        return self.state_view.functions.getSlot0(self.pool_id).call(
+            block_identifier=block or "latest")
 
-    def _prices(self):
-        sqrt_price_x96, _tick, *_ = self.slot0()
+    def _prices(self, block=None):
+        sqrt_price_x96, _tick, *_ = self.slot0(block)
         return pricing.sqrt_price_x96_to_prices(sqrt_price_x96, self.decimals0, self.decimals1)
 
-    def quote_exact(self, token_in, amount_in, hook_data=b""):
+    def quote_exact(self, token_in, amount_in, hook_data=b"", block=None):
         """
         Ask the V4 quoter what this swap really returns.
 
@@ -423,7 +431,8 @@ class V4Pool(Pool):
         )
         params = (self.pool_key, zero_for_one, int(amount_in * 10**decimals_in), hook_data)
         try:
-            amount_out, _gas = quoter.functions.quoteExactInputSingle(params).call()
+            amount_out, _gas = quoter.functions.quoteExactInputSingle(params).call(
+                block_identifier=block or "latest")
             return amount_out / 10**decimals_out
         except Exception:
             return None
