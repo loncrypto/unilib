@@ -336,7 +336,22 @@ class V3Pool(Pool):
         super().__init__(w3, chain, **kwargs)
 
     def slot0(self, block=None):
-        return self.contract.functions.slot0().call(block_identifier=block or "latest")
+        """
+        The price fields, decoded from the front of the struct rather than all of it.
+
+        Forks extend slot0. One pool on this chain returns eight values where
+        Uniswap's returns seven, and decoding against the full Uniswap shape fails on
+        the trailing bytes - turning a perfectly readable price into a decode error.
+
+        sqrtPriceX96 and tick lead the struct in every variant seen, and nothing here
+        reads past them, so only those two are decoded. Anything a fork appends is
+        ignored instead of breaking the pool.
+        """
+        raw = self.w3.eth.call(
+            {"to": self.address, "data": Web3.keccak(text="slot0()")[:4].hex()},
+            block_identifier=block or "latest",
+        )
+        return self.w3.codec.decode(["uint160", "int24"], raw[:64])
 
     def _prices(self, block=None):
         sqrt_price_x96, _tick, *_ = self.slot0(block)
