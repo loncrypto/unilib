@@ -57,6 +57,11 @@ class ChainConfig:
     permit2: str | None = None
     v4_quoter: str | None = None
 
+    # Multicall3 sits at the same address on every chain checked so far - Robinhood,
+    # HyperEVM and Base all carry identical bytecode there - so this defaults rather
+    # than being set per chain. Point it elsewhere, or to None, if a chain differs.
+    multicall: str | None = "0xcA11bde05977b3631167028862bE2a173976CA11"
+
     # Uniswap V2 charges 0.3% (997/1000). Forks differ - PancakeSwap uses 0.25%.
     # A wrong value here silently skews every V2 quote, so it belongs with the chain.
     v2_fee_numerator: int = 997
@@ -71,7 +76,8 @@ class ChainConfig:
         # Address comparison bugs are silent and nasty, so normalise once here
         # rather than sprinkling .lower() through every call site.
         for attr in ("wrapped_native", "state_view", "v3_router", "v2_router",
-                     "v3_quoter", "universal_router", "permit2", "v4_quoter"):
+                     "v3_quoter", "universal_router", "permit2", "v4_quoter",
+                     "multicall"):
             value = getattr(self, attr)
             if value is not None:
                 object.__setattr__(self, attr, Web3.to_checksum_address(value))

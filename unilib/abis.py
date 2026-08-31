@@ -268,6 +268,40 @@ V3_QUOTER_ABI = [
     },
 ]
 
+# Multicall3, deployed at the same address on essentially every EVM chain. aggregate3
+# takes a list of (target, allowFailure, calldata) and returns each result separately,
+# so one pool being unreadable does not lose the rest.
+MULTICALL3_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"internalType": "address", "name": "target", "type": "address"},
+                    {"internalType": "bool", "name": "allowFailure", "type": "bool"},
+                    {"internalType": "bytes", "name": "callData", "type": "bytes"},
+                ],
+                "internalType": "struct Multicall3.Call3[]",
+                "name": "calls",
+                "type": "tuple[]",
+            },
+        ],
+        "name": "aggregate3",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "bool", "name": "success", "type": "bool"},
+                    {"internalType": "bytes", "name": "returnData", "type": "bytes"},
+                ],
+                "internalType": "struct Multicall3.Result[]",
+                "name": "returnData",
+                "type": "tuple[]",
+            },
+        ],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+]
+
 # Permit2: the shared approval contract the Universal Router uses instead of pulling
 # tokens itself. Permission is two-layered - the token is approved to Permit2 once,
 # then Permit2 is told which spender may move how much, until when. Only the

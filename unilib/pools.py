@@ -181,15 +181,33 @@ class Pool:
 
     # -- prices -------------------------------------------------------------
 
+    def price_call(self):
+        """
+        (target, calldata) for the one call that carries this pool's price.
+
+        Split out from _prices so the same encoding serves both ways of asking. Read
+        one pool and it goes out on its own; read forty and they go into a single
+        Multicall3 request. If the two described the call separately they would drift,
+        and the batched path would quietly answer about something else.
+        """
+        raise NotImplementedError
+
+    def decode_prices(self, data):
+        """(price_0, price_1) from whatever price_call() returns."""
+        raise NotImplementedError
+
     def _prices(self, block=None):
         """
-        (price_0, price_1) for this pool - implemented per version.
+        (price_0, price_1) for this pool.
 
         `block` pins the read. Comparing two figures that came from different blocks
         is how a cost ends up negative: the pool moved between the calls and the
         difference stopped being about cost at all.
         """
-        raise NotImplementedError
+        target, data = self.price_call()
+        raw = self.w3.eth.call({"to": target, "data": data},
+                               block_identifier=block or "latest")
+        return self.decode_prices(raw)
 
     def price(self):
         """Current price of the tracked token, expressed in the base asset."""
@@ -281,8 +299,12 @@ class V2Pool(Pool):
             block_identifier=block or "latest")
         return reserve0, reserve1
 
-    def _prices(self, block=None):
-        reserve0, reserve1 = self.reserves(block)
+    def price_call(self):
+        return self.address, Web3.keccak(text="getReserves()")[:4].hex()
+
+    def decode_prices(self, data):
+        reserve0, reserve1, _ = self.w3.codec.decode(
+            ["uint112", "uint112", "uint32"], data)
         amount0 = reserve0 / 10**self.decimals0
         amount1 = reserve1 / 10**self.decimals1
         price_0 = amount1 / amount0
@@ -335,27 +357,27 @@ class V3Pool(Pool):
         self.fee = fee if fee is not None else self.contract.functions.fee().call()
         super().__init__(w3, chain, **kwargs)
 
-    def slot0(self, block=None):
+    def price_call(self):
+        return self.address, Web3.keccak(text="slot0()")[:4].hex()
+
+    def decode_prices(self, data):
         """
-        The price fields, decoded from the front of the struct rather than all of it.
+        Only the first two fields are read, on purpose.
 
         Forks extend slot0. One pool on this chain returns eight values where
         Uniswap's returns seven, and decoding against the full Uniswap shape fails on
         the trailing bytes - turning a perfectly readable price into a decode error.
-
         sqrtPriceX96 and tick lead the struct in every variant seen, and nothing here
-        reads past them, so only those two are decoded. Anything a fork appends is
-        ignored instead of breaking the pool.
+        reads past them, so whatever a fork appends is ignored rather than fatal.
         """
-        raw = self.w3.eth.call(
-            {"to": self.address, "data": Web3.keccak(text="slot0()")[:4].hex()},
-            block_identifier=block or "latest",
-        )
-        return self.w3.codec.decode(["uint160", "int24"], raw[:64])
-
-    def _prices(self, block=None):
-        sqrt_price_x96, _tick, *_ = self.slot0(block)
+        sqrt_price_x96, _tick = self.w3.codec.decode(["uint160", "int24"], data[:64])
         return pricing.sqrt_price_x96_to_prices(sqrt_price_x96, self.decimals0, self.decimals1)
+
+    def slot0(self, block=None):
+        target, data = self.price_call()
+        raw = self.w3.eth.call({"to": target, "data": data},
+                               block_identifier=block or "latest")
+        return self.w3.codec.decode(["uint160", "int24"], raw[:64])
 
 
 class V4Pool(Pool):
@@ -405,13 +427,22 @@ class V4Pool(Pool):
             Web3.to_checksum_address(self.hooks),
         )
 
+    def price_call(self):
+        # V4 pools have no address of their own; state comes from StateView, keyed by
+        # the pool id - so the id travels in the calldata rather than the target.
+        # pool_id arrives as the hex string the user pasted, so it is normalised to
+        # bytes here rather than assumed to be either.
+        return (Web3.to_checksum_address(self.chain.state_view),
+                Web3.keccak(text="getSlot0(bytes32)")[:4]
+                + Web3.to_bytes(hexstr=self.pool_id))
+
+    def decode_prices(self, data):
+        sqrt_price_x96, _tick = self.w3.codec.decode(["uint160", "int24"], data[:64])
+        return pricing.sqrt_price_x96_to_prices(sqrt_price_x96, self.decimals0, self.decimals1)
+
     def slot0(self, block=None):
         return self.state_view.functions.getSlot0(self.pool_id).call(
             block_identifier=block or "latest")
-
-    def _prices(self, block=None):
-        sqrt_price_x96, _tick, *_ = self.slot0(block)
-        return pricing.sqrt_price_x96_to_prices(sqrt_price_x96, self.decimals0, self.decimals1)
 
     def quote_exact(self, token_in, amount_in, hook_data=b"", block=None):
         """

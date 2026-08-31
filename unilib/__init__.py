@@ -27,6 +27,7 @@ from .pools import (
     load_pool,
     restore_pool,
 )
+from .multicall import aggregate, fetch_prices, quote_many
 from .routes import Route
 from .swaps import Swapper, TxResult
 
@@ -50,6 +51,9 @@ __all__ = [
     "load_pool",
     "restore_pool",
     "Route",
+    "aggregate",
+    "fetch_prices",
+    "quote_many",
     "Swapper",
     "TxResult",
     "pricing",
