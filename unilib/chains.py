@@ -39,11 +39,7 @@ class ChainConfig:
     v3_router: str | None = None
     v2_router: str | None = None
 
-    # Which interface v3_router exposes: "classic", "router02", or None to detect it
     # from bytecode on first use. A deployment often ships BOTH routers, so this
-    # describes the address configured above - not the chain. Detection is the safer
-    # default; the wrong guess just fails on an unknown selector.
-    v3_router_variant: str | None = None
 
     # QuoterV2: the contract built for asking "what would this swap return", exactly,
     # including fees and price impact. Simulating through the router works too, but
@@ -160,7 +156,6 @@ ROBINHOOD = ChainConfig(
     permit2="0x000000000022D473030F116dDEE9F6B43aC78BA3",
     # V3: SwapRouter02 interface (deadline outside the params struct).
     v3_router="0xcaf681a66d020601342297493863e78c959e5cb2",
-    v3_router_variant="router02",
     v3_quoter="0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
     # V2 is not an official Uniswap deployment here; this router was found by looking
     # at what successful swaps on a live V2 pool actually call, then verified against
@@ -186,14 +181,10 @@ HYPEREVM = ChainConfig(
     # HyperSwap is an independent Uniswap fork, not an official Uniswap deployment.
     # No V4 found here, so state_view stays None.
     #
-    # HyperSwap ships both routers (verified against their docs and on-chain: both
-    # report this chain's V3 factory and WETH9):
-    #   SwapRouter01  0x4E2960a8cd19B467b82d26D83fAcb0fAE26b094D  - classic interface
-    #   SwapRouter02  0x6D99e7f6747AF2cDbB5164b6DD50e40D4fDe1e77  - router02 interface
-    # 01 is configured because it is the one already proven in use here; switching to
-    # 02 only means changing these two lines, the variant is handled automatically.
-    v3_router="0x4e2960a8cd19b467b82d26d83facb0fae26b094d",
-    v3_router_variant="classic",
+    # HyperSwap ships both routers; SwapRouter02 is used, same interface as the
+    # other chains here. SwapRouter01 (0x4E2960a8cd19B467b82d26D83fAcb0fAE26b094D)
+    # exposes the older interface and is not used.
+    v3_router="0x6d99e7f6747af2cdbb5164b6dd50e40d4fde1e77",
     v3_quoter="0x03A918028f22D9E1473B7959C927AD7425A45C7C",  # QuoterV2
     # v2_router: two candidate addresses were checked and neither held a usable V2
     # router (one had no contract at all), so it stays unset rather than wrong.
@@ -214,7 +205,6 @@ BASE = ChainConfig(
     state_view="0xa3c0c9b65bad0b08107aa264b0f3db444b867a71",
     # SwapRouter02 - deadline is not in the params struct here.
     v3_router="0x2626664c2603336E57B271c5C0b26F421741e481",
-    v3_router_variant="router02",
     v2_router="0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",
     extra_base_tokens={
         "USDC": ("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6),

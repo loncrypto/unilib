@@ -345,51 +345,6 @@ PERMIT2_ABI = [
 # Which one a chain has is not predictable - HyperSwap deployed the classic router,
 # Base deployed SwapRouter02. swaps.py detects it from the bytecode rather than
 # guessing, since calling the wrong one just fails on an unknown selector.
-V3_ROUTER_ABI = [
-    {
-        "inputs": [
-            {
-                "components": [
-                    {"internalType": "address", "name": "tokenIn", "type": "address"},
-                    {"internalType": "address", "name": "tokenOut", "type": "address"},
-                    {"internalType": "uint24", "name": "fee", "type": "uint24"},
-                    {"internalType": "address", "name": "recipient", "type": "address"},
-                    {"internalType": "uint256", "name": "deadline", "type": "uint256"},
-                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
-                    {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"},
-                    {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"},
-                ],
-                "internalType": "struct ISwapRouter.ExactInputSingleParams",
-                "name": "params",
-                "type": "tuple",
-            },
-        ],
-        "name": "exactInputSingle",
-        "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
-        "stateMutability": "payable",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"internalType": "uint256", "name": "amountMinimum", "type": "uint256"},
-            {"internalType": "address", "name": "recipient", "type": "address"},
-        ],
-        "name": "unwrapWETH9",
-        "outputs": [],
-        "stateMutability": "payable",
-        "type": "function",
-    },
-    {
-        "inputs": [{"internalType": "bytes[]", "name": "data", "type": "bytes[]"}],
-        "name": "multicall",
-        "outputs": [{"internalType": "bytes[]", "name": "results", "type": "bytes[]"}],
-        "stateMutability": "payable",
-        "type": "function",
-    },
-]
-
-# SwapRouter02: same call, no deadline field. Deadline protection comes from the
-# multicall(uint256 deadline, bytes[]) wrapper instead.
 V3_ROUTER02_ABI = [
     {
         "inputs": [
@@ -434,14 +389,6 @@ V3_ROUTER02_ABI = [
         "type": "function",
     },
 ]
-
-# Selectors used to tell the two router interfaces apart from bytecode alone.
-V3_EXACT_INPUT_SINGLE_CLASSIC = (
-    "exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))"
-)
-V3_EXACT_INPUT_SINGLE_ROUTER02 = (
-    "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))"
-)
 
 # The ...SupportingFeeOnTransferTokens variants exist for tokens that take a cut on
 # every transfer ("vergili/slipajli" tokens). The plain functions verify amounts

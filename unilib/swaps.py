@@ -61,7 +61,6 @@ class Swapper:
         self.chain = chain
         self.account = account
         self.w3 = w3 or chain.connect()
-        self._v3_variant_cache = None
         self._codec_cache = None
 
     @property
@@ -70,53 +69,29 @@ class Swapper:
 
     # -- routers ------------------------------------------------------------
 
-    def v3_variant(self):
-        """
-        Which V3 router interface this chain deployed: "classic" or "router02".
-
-        Read from config when set, otherwise detected once from the router's bytecode
-        and cached. Detection matters because the two interfaces take different
-        arguments, and calling the wrong one fails on an unknown selector.
-        """
-        if self.chain.v3_router_variant:
-            return self.chain.v3_router_variant
-        if self._v3_variant_cache:
-            return self._v3_variant_cache
-
-        code = self.w3.eth.get_code(Web3.to_checksum_address(self.chain.v3_router)).hex()
-        classic = Web3.keccak(text=abis.V3_EXACT_INPUT_SINGLE_CLASSIC)[:4].hex()
-        router02 = Web3.keccak(text=abis.V3_EXACT_INPUT_SINGLE_ROUTER02)[:4].hex()
-
-        if classic in code:
-            self._v3_variant_cache = "classic"
-        elif router02 in code:
-            self._v3_variant_cache = "router02"
-        else:
-            raise ValueError(
-                f"{self.chain.v3_router} bilinen bir V3 router arayuzune uymuyor "
-                "(ne klasik ne router02 exactInputSingle bulundu)"
-            )
-        return self._v3_variant_cache
-
     def _v3_router(self):
         if not self.chain.v3_router:
             raise ValueError(f"{self.chain.name} icin v3_router adresi tanimli degil")
-        abi = abis.V3_ROUTER_ABI if self.v3_variant() == "classic" else abis.V3_ROUTER02_ABI
-        return self.w3.eth.contract(address=self.chain.v3_router, abi=abi)
+        return self.w3.eth.contract(address=self.chain.v3_router, abi=abis.V3_ROUTER02_ABI)
 
     def _exact_input_params(self, token_in, token_out, fee, recipient, amount_in_wei,
                             min_out_wei, deadline):
-        """Params tuple for exactInputSingle, shaped for whichever interface is deployed."""
-        common = (
+        """
+        Params tuple for exactInputSingle.
+
+        SwapRouter02 keeps the deadline out of the struct - it belongs to the
+        multicall that wraps the call, not to the swap itself. `deadline` is taken
+        here anyway so callers do not have to know that.
+        """
+        return (
             Web3.to_checksum_address(token_in),
             Web3.to_checksum_address(token_out),
             fee,
             recipient,
+            amount_in_wei,
+            min_out_wei,
+            0,
         )
-        tail = (amount_in_wei, min_out_wei, 0)
-        if self.v3_variant() == "classic":
-            return common + (deadline,) + tail
-        return common + tail
 
     def _v2_router(self):
         if not self.chain.v2_router:
@@ -802,27 +777,20 @@ class Swapper:
 
     def _v3_tx(self, router, swap_fn, deadline, extra=None, value=0):
         """
-        Build the V3 transaction, hiding the difference between the two interfaces.
+        Build the V3 transaction.
 
-        classic:  deadline already sits inside the swap params, so a bare call works
-                  and multicall is only needed to append something (like unwrapping).
-        router02: the params have no deadline, so calls go through
-                  multicall(deadline, data) - which is also where extra calls attach.
+        SwapRouter02's params carry no deadline, so every call goes through
+        multicall(deadline, data) - which is also where a follow-up call attaches,
+        such as unwrapping the proceeds after a sell.
 
-        Either way the caller just says "this swap, plus optionally this follow-up".
+        The caller just says "this swap, plus optionally this follow-up".
         """
         calls = [swap_fn]
         if extra is not None:
             calls.append(extra)
 
-        if self.v3_variant() == "router02":
-            data = [Web3.to_bytes(hexstr=c._encode_transaction_data()) for c in calls]
-            fn = router.functions.multicall(deadline, data)
-        elif len(calls) == 1:
-            fn = swap_fn
-        else:
-            data = [Web3.to_bytes(hexstr=c._encode_transaction_data()) for c in calls]
-            fn = router.functions.multicall(data)
+        data = [Web3.to_bytes(hexstr=c._encode_transaction_data()) for c in calls]
+        fn = router.functions.multicall(deadline, data)
 
         return fn.build_transaction(self._tx_params(value=value))
 
