@@ -66,18 +66,39 @@ def get_pool_manager(w3, state_view_address):
     return state_view.functions.poolManager().call()
 
 
-def fetch_v4_pool_key(w3, state_view_address, pool_id, from_block=0):
+def pool_key_from_position_manager(w3, position_manager, pool_id):
     """
-    Recover a V4 pool's full PoolKey from its id.
+    Ask PositionManager for the PoolKey behind a pool id.
 
-    A pool id is keccak of the PoolKey, so it cannot be reversed. But PoolManager
-    emits an Initialize event once at pool creation, indexed by pool id, carrying
-    every field - so one log query gives back what the hash hid.
+    The id is keccak of the key and cannot be reversed, but the contract kept the
+    key when the pool was created: poolKeys() is a mapping from the first 25 bytes
+    of the id to the whole struct. One eth_call, and it works on any endpoint -
+    unlike the Initialize event, which needs a log query most RPCs will not serve.
 
-    Returns (currency0, currency1, fee, tick_spacing, hooks).
+    Returns (currency0, currency1, fee, tick_spacing, hooks), or None when the
+    contract has never seen this pool.
+    """
+    selector = Web3.keccak(text="poolKeys(bytes25)")[:4]
+    # bytes25 is left-aligned in its word, so the tail is padding rather than data.
+    key = Web3.to_bytes(hexstr=pool_id)[:25].ljust(32, b"\x00")
+    raw = w3.eth.call({"to": Web3.to_checksum_address(position_manager),
+                       "data": selector + key})
+    currency0, currency1, fee, tick_spacing, hooks = w3.codec.decode(
+        ["address", "address", "uint24", "int24", "address"], raw)
+    # An unknown id decodes to zeroes rather than reverting; both currencies being
+    # zero is impossible for a real pool, since currency0 < currency1.
+    if int(currency0, 16) == 0 and int(currency1, 16) == 0:
+        return None
+    return currency0, currency1, fee, tick_spacing, hooks
 
-    from_block defaults to 0 (whole chain history). On older/busier chains an RPC
-    may refuse that range, in which case pass the deployment block or scan in chunks.
+
+def pool_key_from_logs(w3, state_view_address, pool_id, from_block=0):
+    """
+    Recover a PoolKey from the Initialize event PoolManager emits at creation.
+
+    The fallback for chains with no PositionManager configured. It needs a log query
+    over the whole chain, which many endpoints refuse outright and none serve
+    quickly - hence the fallback rather than the default.
     """
     pool_manager = get_pool_manager(w3, state_view_address)
     topic0 = Web3.keccak(text=abis.V4_INITIALIZE_EVENT)
@@ -101,6 +122,27 @@ def fetch_v4_pool_key(w3, state_view_address, pool_id, from_block=0):
         ["uint24", "int24", "address", "uint160", "int24"], log["data"]
     )
     return currency0, currency1, fee, tick_spacing, hooks
+
+
+def fetch_v4_pool_key(w3, chain, pool_id, from_block=0):
+    """
+    The PoolKey behind a pool id, by whichever route this chain allows.
+
+    PositionManager first: one call, no history, no endpoint requirements. Falling
+    back to the Initialize event only when the chain has no PositionManager set, or
+    when it has not heard of this pool.
+
+    Returns (currency0, currency1, fee, tick_spacing, hooks).
+    """
+    if chain.position_manager:
+        try:
+            key = pool_key_from_position_manager(w3, chain.position_manager, pool_id)
+            if key:
+                return key
+        except Exception:
+            pass                       # fall through to the slower way
+
+    return pool_key_from_logs(w3, chain.state_view, pool_id, from_block)
 
 
 class Pool:
@@ -520,7 +562,7 @@ def load_pool(chain, identifier, w3=None, from_block=0):
                 f"{chain.name} icin StateView adresi tanimli degil - V4 pool okunamaz"
             )
         currency0, currency1, fee, tick_spacing, hooks = fetch_v4_pool_key(
-            w3, chain.state_view, identifier, from_block
+            w3, chain, identifier, from_block
         )
         symbol0, decimals0 = fetch_token_info(w3, currency0, chain)
         symbol1, decimals1 = fetch_token_info(w3, currency1, chain)

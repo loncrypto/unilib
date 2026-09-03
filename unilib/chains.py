@@ -36,6 +36,12 @@ class ChainConfig:
     # V4: single PoolManager for all pools; StateView is its read-only view helper.
     state_view: str | None = None
 
+    # V4: PositionManager keeps every PoolKey it ever minted into, indexed by the
+    # first 25 bytes of the pool id. That is the only way back from an id to the key
+    # it was hashed from - short of scanning the chain for the Initialize event,
+    # which most endpoints refuse.
+    position_manager: str | None = None
+
     v3_router: str | None = None
     v2_router: str | None = None
 
@@ -71,7 +77,8 @@ class ChainConfig:
     def __post_init__(self):
         # Address comparison bugs are silent and nasty, so normalise once here
         # rather than sprinkling .lower() through every call site.
-        for attr in ("wrapped_native", "state_view", "v3_router", "v2_router",
+        for attr in ("wrapped_native", "state_view", "position_manager",
+                     "v3_router", "v2_router",
                      "v3_quoter", "universal_router", "permit2", "v4_quoter",
                      "multicall"):
             value = getattr(self, attr)
@@ -135,6 +142,18 @@ class ChainConfig:
                     f"{self.name}: beklenen chain_id {self.chain_id}, gelen {actual}. "
                     "Yanlis RPC'ye mi baglaniliyor?"
                 )
+
+        # web3's validation middleware re-reads eth_chainId twice for every request
+        # it passes through - two thirds of all traffic on a read-heavy workload, and
+        # billed as three calls where one was made. The check it performs is the one
+        # just done above, once, against config; and transactions carry an explicit
+        # chainId rather than whatever the endpoint reports at signing time. Dropping
+        # it costs nothing that is not already covered.
+        try:
+            w3.middleware_onion.remove("validation")
+        except (KeyError, ValueError):
+            pass                       # older web3 without that middleware
+
         return w3
 
 
@@ -151,6 +170,7 @@ ROBINHOOD = ChainConfig(
     # V4: PoolManager is 0x8366a39CC670B4001A1121B8F6A443A643e40951, reachable from
     # StateView.poolManager(), so it is not stored separately.
     state_view="0xf3334192d15450cdd385c8b70e03f9a6bd9e673b",
+    position_manager="0x58daec3116aae6d93017baaea7749052e8a04fa7",
     v4_quoter="0x8dc178efb8111bb0973dd9d722ebeff267c98f94",
     universal_router="0x8876789976decbfcbbbe364623c63652db8c0904",
     permit2="0x000000000022D473030F116dDEE9F6B43aC78BA3",
@@ -203,6 +223,12 @@ BASE = ChainConfig(
     # Official Uniswap deployment; StateView.poolManager() verified to return
     # 0x498581fF718922c3f8e6A244956aF099B2652b2b.
     state_view="0xa3c0c9b65bad0b08107aa264b0f3db444b867a71",
+    position_manager="0x7c5f5a4bbd8fd63184577525326123b519429bdc",
+    # Verified on-chain, not just read off the deployments page: each address holds
+    # a contract and carries the selector it is used for.
+    v4_quoter="0x0d5e0f971ed27fbff6c2837bf31316121532048d",
+    universal_router="0x6ff5693b99212da76ad316178a184ab56d299b43",
+    permit2="0x000000000022D473030F116dDEE9F6B43aC78BA3",
     # SwapRouter02 - deadline is not in the params struct here.
     v3_router="0x2626664c2603336E57B271c5C0b26F421741e481",
     v2_router="0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",

@@ -795,8 +795,12 @@ class Swapper:
         return fn.build_transaction(self._tx_params(value=value))
 
     def _tx_params(self, value=0):
+        # chainId is stated rather than asked for. web3 would otherwise fetch it while
+        # building, and a signed transaction should carry the chain this library was
+        # configured for - not whichever one the endpoint claims at that moment.
         params = {
             "from": self.address,
+            "chainId": self.chain.chain_id,
             "nonce": self.w3.eth.get_transaction_count(self.address),
         }
         if value:
